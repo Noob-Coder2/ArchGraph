@@ -1,4 +1,14 @@
-__pycache__
-*.pyc
 __pycache__/
 *.pyc
+.venv/
+.agents/
+.env
+graphify-out/
+*.log
+.pytest_cache/
+
+report/
+data/
+*.db
+*.db-wal
+*.db-shm

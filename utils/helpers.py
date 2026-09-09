@@ -1,5 +1,5 @@
 """
-Utility functions for File Merger WebApp
+Utility functions for DocuStream WebApp
 - Input validation and sanitization
 - Rate limiting for API calls
 - Common helper functions

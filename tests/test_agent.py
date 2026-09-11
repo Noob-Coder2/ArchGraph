@@ -35,7 +35,7 @@ class TestCodebaseAgent:
         vector = LlamaIndexEngine()
         hybrid = HybridRetriever(graph, vector)
 
-        agent = CodebaseAgent(hybrid, graph)
+        agent = CodebaseAgent(graph, vector)
         app_graph = agent.build_agent_graph(
             model_name="llama-3.3-70b-versatile",
             api_key="mock-key",

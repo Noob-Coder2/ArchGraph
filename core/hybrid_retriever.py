@@ -4,8 +4,8 @@ Fuses structural code graphs with semantic vector chunks into unified LLM contex
 """
 import re
 from typing import Dict, Any, List
-from api.graphify_engine import GraphifyEngine
-from api.llamaindex_engine import LlamaIndexEngine
+from core.graphify_engine import GraphifyEngine
+from core.llamaindex_engine import LlamaIndexEngine
 
 
 class HybridRetriever:

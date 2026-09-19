@@ -5,7 +5,7 @@ in-memory fallback and SQLite artifact resolution.
 """
 import requests
 from typing import Dict, Any, List, Optional
-from core.consolidator import DocumentConsolidator
+from services.consolidator import DocumentConsolidator
 
 
 class APIClient:

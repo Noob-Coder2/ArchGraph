@@ -4,7 +4,7 @@ Allows merging files into Markdown, Plain Text, or Pure-Python PDF.
 Persists generated outputs in session state so download buttons never disappear.
 """
 import streamlit as st
-from core.consolidator import DocumentConsolidator
+from services.consolidator import DocumentConsolidator
 
 
 def render_consolidator_ui():

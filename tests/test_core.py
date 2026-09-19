@@ -3,8 +3,8 @@ Unit tests for DocuStream Core: Consolidator & GitHub Services.
 """
 import io
 import pytest
-from core.consolidator import DocumentConsolidator
-from core.github_service import GitHubService
+from services.consolidator import DocumentConsolidator
+from services.github_service import GitHubService
 
 
 class TestDocumentConsolidator:

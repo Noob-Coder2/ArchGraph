@@ -26,11 +26,11 @@ from api.models import (
     IngestGitHubRequest, IngestFilesRequest, IngestResponse,
     ChatStreamRequest, ReportRequest, GraphDataResponse
 )
-from api.graphify_engine import GraphifyEngine
-from api.llamaindex_engine import LlamaIndexEngine
-from api.agent import CodebaseAgent
-from core.storage import storage
-from core.github_service import GitHubService
+from core.graphify_engine import GraphifyEngine
+from core.llamaindex_engine import LlamaIndexEngine
+from core.agent import CodebaseAgent
+from services.storage import storage
+from services.github_service import GitHubService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

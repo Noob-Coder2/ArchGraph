@@ -3,9 +3,9 @@ Unit tests for DocuStream API, Graphify Engine, and Hybrid Retrieval.
 """
 import pytest
 from fastapi.testclient import TestClient
-from api.graphify_engine import GraphifyEngine
-from api.llamaindex_engine import LlamaIndexEngine
-from api.hybrid_retriever import HybridRetriever
+from core.graphify_engine import GraphifyEngine
+from core.llamaindex_engine import LlamaIndexEngine
+from core.hybrid_retriever import HybridRetriever
 from api.main import app
 
 

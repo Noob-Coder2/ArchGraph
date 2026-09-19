@@ -30,7 +30,7 @@ from graphify.analyze import god_nodes, surprising_connections, suggest_question
 from graphify.report import generate as generate_graph_report
 from graphify.export import to_json
 from graphify.exporters.html import to_html as export_to_html
-from core.storage import storage
+from services.storage import storage
 
 
 class GraphifyEngine:

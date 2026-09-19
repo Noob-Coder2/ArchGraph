@@ -9,7 +9,7 @@ Supports:
 import asyncio
 import streamlit as st
 from streamlit_tree_select import tree_select
-from core.github_service import GitHubService
+from services.github_service import GitHubService
 
 
 def render_github_loader():

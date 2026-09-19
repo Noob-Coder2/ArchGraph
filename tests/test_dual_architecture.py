@@ -14,10 +14,10 @@ import asyncio
 from pathlib import Path
 from fastapi.testclient import TestClient
 
-from core.storage import StorageEngine
-from api.graphify_engine import GraphifyEngine
-from api.llamaindex_engine import LlamaIndexEngine
-from api.agent import CodebaseAgent
+from services.storage import StorageEngine
+from core.graphify_engine import GraphifyEngine
+from core.llamaindex_engine import LlamaIndexEngine
+from core.agent import CodebaseAgent
 from api.main import app
 
 

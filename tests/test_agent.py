@@ -3,10 +3,10 @@ Unit tests for LangGraph CodebaseAgent orchestrator and tool binding across prov
 """
 import asyncio
 import pytest
-from api.graphify_engine import GraphifyEngine
-from api.llamaindex_engine import LlamaIndexEngine
-from api.hybrid_retriever import HybridRetriever
-from api.agent import CodebaseAgent, get_chat_model
+from core.graphify_engine import GraphifyEngine
+from core.llamaindex_engine import LlamaIndexEngine
+from core.hybrid_retriever import HybridRetriever
+from core.agent import CodebaseAgent, get_chat_model
 
 
 class TestCodebaseAgent:

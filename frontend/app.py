@@ -35,7 +35,7 @@ def init_session():
     if 'graph_data' not in st.session_state:
         st.session_state.graph_data = {"nodes": [], "edges": []}
     if 'api_client' not in st.session_state:
-        st.session_state.api_client = APIClient("http://localhost:8000")
+        st.session_state.api_client = APIClient("http://127.0.0.1:8000")
 
 
 def main():

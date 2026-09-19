@@ -53,9 +53,51 @@ class TestCodebaseAgent:
         assert "graphify_path" in tool_names
         assert "graphify_explain" in tool_names
         assert "search_knowledge_base" in tool_names
+        assert "read_source_file" in tool_names
+        assert "list_repo_files" in tool_names
+        assert "get_architecture_overview" in tool_names
 
         # Verify tool execution
         explain_tool = next(t for t in tools if t.name == "graphify_explain")
         overview = asyncio.run(explain_tool.ainvoke({"symbol": "NonExistent"}))
         assert "not found" in overview or "empty" in overview
+
+        # Verify list_repo_files execution
+        list_tool = next(t for t in tools if t.name == "list_repo_files")
+        file_list = asyncio.run(list_tool.ainvoke({}))
+        assert "Indexed Repository Files" in file_list or "No files" in file_list
+
+        # Verify get_architecture_overview execution
+        arch_tool = next(t for t in tools if t.name == "get_architecture_overview")
+        arch_summary = asyncio.run(arch_tool.ainvoke({}))
+        assert "Architectural Overview" in arch_summary or "Entities" in arch_summary
+
+        # Verify read_source_file execution
+        read_tool = next(t for t in tools if t.name == "read_source_file")
+        code_view = asyncio.run(read_tool.ainvoke({"filepath": "README.md", "start_line": 1, "line_count": 5}))
+        assert "File:" in code_view or "not found" in code_view
+
+    def test_stream_reasoning_yields_events(self):
+        graph = GraphifyEngine()
+        vector = LlamaIndexEngine()
+        agent = CodebaseAgent(graph, vector)
+
+        async def _test():
+            gen = agent.stream_reasoning(
+                messages=[{"role": "user", "content": "What does this repo do?"}],
+                model_name="llama-3.3-70b-versatile",
+                api_key="mock-key",
+                provider="groq"
+            )
+            chunks = []
+            async for chunk in gen:
+                chunks.append(chunk)
+                if len(chunks) >= 1:
+                    break
+            assert len(chunks) > 0
+            assert "data:" in chunks[0]
+
+        asyncio.run(_test())
+
+
 

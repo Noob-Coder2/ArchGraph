@@ -49,12 +49,13 @@ flowchart TD
         VecIndex -.-> SQLite
     end
 
-    subgraph Agentic ["4. LangGraph Multi-Tool Agent"]
-        LG["LangGraph StateGraph (astream_events v2)"]
-        LG --> Tool1["Tool: graphify_query (BFS/DFS Traversal)"]
-        LG --> Tool2["Tool: graphify_path (Dependency Chains)"]
-        LG --> Tool3["Tool: graphify_explain (Symbol Context)"]
-        LG --> Tool4["Tool: search_knowledge_base (LlamaIndex)"]
+    subgraph Agentic ["4. LangGraph Subagents-as-Tools Layer"]
+        LG["Lead Supervisor Agent (create_agent)"]
+        LG --> Sub1["Subagent: Architect (Call-Flows & God Nodes)"]
+        LG --> Sub2["Subagent: Researcher (Docs & PRD Specs)"]
+        LG --> Sub3["Subagent: Bug Finder (Exceptions & Leaks)"]
+        LG --> Sub4["Subagent: Logic Break Finder (Discrepancies)"]
+        LG --> Tools["Direct Tools: read_source_file / list_files / arch_overview"]
         LLMs["Models: Groq / NVIDIA NIM / Claude / OpenAI"] <--> LG
     end
 
@@ -90,8 +91,13 @@ flowchart TD
 - **Granular Retrieval**: Filtered semantic search matching natural language questions to exact source passages and PDF page numbers.
 
 ### 3. 🤖 Agentic Reasoning & Live SSE Streaming
-- **LangGraph StateGraph**: Orchestrates multi-step reasoning, determining dynamically whether to traverse the code graph, search documentation vectors, or fuse both.
-- **Live Event Streaming (SSE)**: Uses LangGraph v2 `astream_events` to stream thinking steps, tool call badges (`*⚡ Traversing code graph...*`), and generated tokens in real time.
+- **Subagents-as-Tools Architecture**: Built with LangChain's official `create_agent()`. A central **Lead Supervisor Agent** orchestrates 4 specialized stateless subagents dynamically:
+  - **Architect Subagent (`ask_architect_agent`)**: Analyzes codebase structure, modular coupling, circular dependencies, call flows, and central God Nodes.
+  - **Researcher Subagent (`ask_researcher_agent`)**: Retrieves and synthesizes technical documentation, PRD specifications, and multi-page PDF passages.
+  - **Bug Finder Subagent (`ask_bug_finder_agent`)**: Audits suspected files for unhandled error states, missing null checks, edge-case failures, and resource leaks.
+  - **Logic Break Finder Subagent (`ask_logic_break_finder_agent`)**: Discovers "what doesn't make sense in the repo" by cross-examining PRD requirements against actual code, detecting dead code paths, and flagging broken wiring.
+- **Direct Inspection Tools**: Supervisor has direct fallback access to `read_source_file`, `list_repo_files`, and `get_architecture_overview`.
+- **Live Event Streaming (SSE)**: Uses LangGraph v2 `astream_events` to stream real-time tool badges (`*🏛️ Architect Subagent: Analyzing structural call-flows...*`) and generated tokens.
 - **Multi-Provider Support**:
   - **Groq Cloud**: High-throughput inference with Llama 3.3 70B, Mixtral 8x7B, and DeepSeek-R1.
   - **NVIDIA NIM**: Enterprise-grade inference via `build.nvidia.com` (Nemotron 3.5, Llama 3.1 70B).
@@ -122,33 +128,41 @@ flowchart TD
 ```
 DocuStream/
 ├── api/                            # FastAPI Backend Service
-│   ├── main.py                     # API entrypoint, routes, & SSE stream
-│   ├── graphify_engine.py          # Graphify AST extraction & traversal
-│   ├── llamaindex_engine.py        # LlamaIndex FastEmbed local vector search
-│   ├── hybrid_retriever.py         # Graph + Vector fusion layer
-│   ├── agent.py                    # LangGraph multi-tool reasoning agent
-│   └── models.py                   # Pydantic schemas
-├── core/                           # Core Platform Services
-│   ├── storage.py                  # SQLite session & artifact database
-│   ├── consolidator.py             # File merger, sanitization, & token counter
-│   └── github_service.py           # GitHub API tree & blob loader
-├── frontend/                       # Streamlit UI
-│   ├── app.py                      # Multi-tab Streamlit dashboard
-│   ├── components/                 # UI components
-│   │   ├── consolidator_ui.py      # Merger & file queue panel
-│   │   ├── graph_view.py           # Graphify graph.html interactive view
-│   │   ├── chat.py                 # Real-time SSE streaming chat
-│   │   ├── file_manager.py         # File upload & management
-│   │   └── github_loader.py        # GitHub repository explorer
-│   └── styles/                     # Modern glassmorphism CSS
-├── report/                         # Architectural Reports & Plans
-│   ├── DUAL_ARCHITECTURE_PLAN.md   # Complete Graphify + LlamaIndex plan
-│   ├── FUTURE_PLANS.md             # Long-term roadmap
-│   └── VERIFICATION_REPORT.md      # Test verification reports
+│   ├── main.py                     # API entrypoint, session cache, & SSE streaming routes
+│   └── models.py                   # Pydantic request/response schemas
+├── core/                           # Dual-Pillar Intelligence Core & Agents
+│   ├── agent.py                    # LangGraph Subagents-as-Tools orchestrator & supervisor
+│   ├── graphify_engine.py          # Tree-Sitter AST, Louvain clustering, God Nodes, HTML viz
+│   ├── llamaindex_engine.py        # FastEmbed local ONNX vector retrieval & PDF chunking
+│   ├── hybrid_retriever.py         # Graph + Vector retrieval fusion layer
+│   └── tools.py                    # Shared agent tool declarations
+├── services/                       # Platform Services & Storage
+│   ├── storage.py                  # Thread-safe SQLite database (docustream.db) & SHA manifest
+│   ├── consolidator.py             # Pure-Python MD (TOC), TXT, & ReportLab/pypdf PDF consolidator
+│   └── github_service.py           # GitHub API tree fetcher & concurrent blob loader
+├── frontend/                       # Streamlit UI Dashboard
+│   ├── app.py                      # Multi-tab Streamlit dashboard entrypoint
+│   ├── components/                 # Modular UI components
+│   │   ├── consolidator_ui.py      # Merger, output format, & download panel
+│   │   ├── graph_view.py           # Interactive Graphify graph.html visualizer
+│   │   ├── chat.py                 # Real-time SSE streaming chat interface
+│   │   ├── file_manager.py         # Local file uploader & management
+│   │   └── github_loader.py        # GitHub repository tree explorer
+│   ├── styles/                     # Glassmorphic CSS styling & badges
+│   └── utils/                      # Frontend API client (api_client.py)
+├── tests/                          # Automated Test Suite (21/21 Passing)
+│   ├── test_agent.py               # Provider models & LangGraph compilation tests
+│   ├── test_api.py                 # FastAPI endpoints & ingestion tests
+│   ├── test_core.py                # Consolidator & GitHub service tests
+│   └── test_dual_architecture.py   # Full integration & SQLite persistence tests
+├── report/                         # Architectural Documentation & Roadmaps
+│   ├── DUAL_ARCHITECTURE_PLAN.md   # Architectural design manifesto
+│   ├── FUTURE_PLANS.md             # Long-term feature roadmap
+│   └── VERIFICATION_REPORT.md      # Pytest validation reports
 ├── requirements.txt                # Python dependencies
 ├── Dockerfile                      # Container specification
 ├── docker-compose.yml              # Multi-container orchestration
-└── app.py                          # Root entrypoint
+└── app.py                          # Root frontend entrypoint
 ```
 
 ---
@@ -219,18 +233,22 @@ Access the application at `http://localhost:8501`.
 
 ## 🧪 Testing
 
-Execute the comprehensive test suite:
+Execute the comprehensive test suite (21/21 passing):
 
 ```bash
+# Recommended command (ensures project root is in PYTHONPATH)
+python -m pytest tests/ -v
+
+# Or directly with pytest (requires pytest.ini in root)
 pytest tests/ -v
 ```
 
 Tests cover:
-- **Storage**: SQLite database initialization, serialization, and manifest tracking.
-- **Graphify**: Multi-language AST parsing, diagnostics health check, community clustering, and HTML export.
-- **LlamaIndex**: FastEmbed ONNX local embedding and semantic document retrieval.
-- **LangGraph**: Multi-tool agent execution and SSE streaming.
-- **FastAPI**: Ingestion endpoints and live SSE streaming response.
+- **Storage**: SQLite database initialization, artifact serialization (`graph.json`, `graph.html`, `GRAPH_REPORT.md`), and manifest SHA tracking.
+- **Graphify**: Multi-language Tree-Sitter AST parsing, diagnostics health checks, Louvain community clustering, God Node identification, and standalone HTML export.
+- **LlamaIndex**: FastEmbed ONNX local embedding and semantic document/PDF page retrieval.
+- **LangGraph Subagents**: Supervisor coordination, subagent tools, provider model instantiation (NVIDIA, Groq, Anthropic, OpenAI), and SSE event streaming.
+- **FastAPI**: Ingestion endpoints (`/api/ingest/files`, `/api/ingest/github`), graph data routes, and live SSE streaming responses.
 
 ---
 

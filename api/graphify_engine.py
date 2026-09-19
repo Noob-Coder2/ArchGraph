@@ -13,9 +13,12 @@ import os
 import tempfile
 import json
 import hashlib
+import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import networkx as nx
+
+logger = logging.getLogger(__name__)
 
 # Official Graphify modules
 from graphify.detect import detect, save_manifest
@@ -99,7 +102,8 @@ class GraphifyEngine:
             # 2. Multi-Modal Detection (Capability 1)
             try:
                 detection_result = detect(temp_path)
-            except Exception:
+            except Exception as e:
+                logger.error("Multi-Modal Detection failed", exc_info=True)
                 detection_result = {
                     "total_files": len(self.file_contents),
                     "files": {"code": list(self.file_contents.keys())},
@@ -122,7 +126,8 @@ class GraphifyEngine:
 
             try:
                 ast_extraction = extract(code_file_paths, cache_root=temp_path)
-            except Exception:
+            except Exception as e:
+                logger.error(f"AST Extraction failed for {len(code_file_paths)} files", exc_info=True)
                 ast_extraction = {"nodes": [], "edges": []}
 
             # 4. Diagnostics & Health Gate (Capability 5)
@@ -132,7 +137,8 @@ class GraphifyEngine:
                     directed=True,
                     root=temp_path
                 )
-            except Exception:
+            except Exception as e:
+                logger.error("Diagnostics failed", exc_info=True)
                 self.diagnostics_summary = {"status": "diagnostics_skipped"}
 
             # 5. Graph Construction (Part C / Step 4)
@@ -164,7 +170,8 @@ class GraphifyEngine:
                     self.suggested_questions_list = suggest_questions(
                         undirected_g, self.communities, self.community_labels
                     )
-                except Exception:
+                except Exception as e:
+                    logger.error("Community clustering or analysis failed", exc_info=True)
                     self.communities = {0: list(self.graph.nodes())}
                     self.community_labels = {0: "Core Module"}
                     cohesion = {}
@@ -188,7 +195,8 @@ class GraphifyEngine:
                     root=str(temp_path),
                     suggested_questions=self.suggested_questions_list
                 )
-            except Exception:
+            except Exception as e:
+                logger.error("Report generation failed", exc_info=True)
                 self.report_markdown = self.get_architectural_summary()
 
             graph_json_path = target_out_dir / "graph.json"
@@ -206,7 +214,8 @@ class GraphifyEngine:
                 )
                 if html_path.exists():
                     self.html_content = html_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
+            except Exception as e:
+                logger.error("HTML generation failed", exc_info=True)
                 self.html_content = ""
 
             # 9. Persist to Embedded SQLite Database

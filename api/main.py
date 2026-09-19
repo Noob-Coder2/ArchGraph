@@ -9,6 +9,9 @@ Dual-Pillar Architecture:
 import os
 import uuid
 import time
+import asyncio
+import json
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
@@ -29,6 +32,8 @@ from api.agent import CodebaseAgent
 from core.storage import storage
 from core.github_service import GitHubService
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="DocuStream Intelligence API",
@@ -61,7 +66,7 @@ class SessionContainer:
 SESSIONS: Dict[str, SessionContainer] = {}
 
 
-def get_or_create_session(session_id: Optional[str] = None) -> SessionContainer:
+async def get_or_create_session(session_id: Optional[str] = None) -> SessionContainer:
     """Retrieves an existing session from memory/SQLite or provisions a new container."""
     now = time.time()
     # Expire old in-memory references after 2 hours
@@ -74,22 +79,22 @@ def get_or_create_session(session_id: Optional[str] = None) -> SessionContainer:
         container = SessionContainer(target_id)
         SESSIONS[target_id] = container
         # Sync with SQLite
-        storage.create_or_update_session(target_id)
+        await asyncio.to_thread(storage.create_or_update_session, target_id)
 
     session = SESSIONS[target_id]
     session.last_active = now
-    storage.touch_session(target_id)
+    await asyncio.to_thread(storage.touch_session, target_id)
     return session
 
 
 @app.get("/health")
-def health_check():
+async def health_check():
     """Health check route reporting active sessions."""
     return {"status": "ok", "active_sessions": len(SESSIONS)}
 
 
 @app.post("/api/ingest/github", response_model=IngestResponse)
-def ingest_github_repo(req: IngestGitHubRequest):
+async def ingest_github_repo(req: IngestGitHubRequest):
     """Ingests a GitHub repository into Graphify and LlamaIndex."""
     token = req.token or os.getenv("GITHUB_TOKEN")
     parsed = GitHubService.parse_github_url(req.repo_url)
@@ -98,8 +103,8 @@ def ingest_github_repo(req: IngestGitHubRequest):
 
     owner, repo, branch = parsed['owner'], parsed['repo'], req.branch or parsed['branch']
 
-    # Fetch repo tree
-    tree, err = GitHubService.fetch_repo_tree(owner, repo, branch, token=token)
+    # Fetch repo tree asynchronously
+    tree, err = await GitHubService.fetch_repo_tree(owner, repo, branch, token=token)
     if not tree:
         raise HTTPException(status_code=400, detail=err or "Failed to fetch repository tree.")
 
@@ -111,11 +116,11 @@ def ingest_github_repo(req: IngestGitHubRequest):
     ]
 
     target_paths = req.selected_paths if req.selected_paths else candidate_paths[:150]
-    files, errors = GitHubService.fetch_multiple_files(owner, repo, target_paths, branch=branch, token=token)
+    files, errors = await GitHubService.fetch_multiple_files(owner, repo, target_paths, branch=branch, token=token)
     if not files:
         raise HTTPException(status_code=400, detail="No valid files could be downloaded from the repository.")
 
-    session = get_or_create_session()
+    session = await get_or_create_session()
     session.graphify.clear()
     session.vector_engine.clear()
 
@@ -134,11 +139,12 @@ def ingest_github_repo(req: IngestGitHubRequest):
             else:
                 session.graphify.add_file(f.name, content)
                 session.vector_engine.add_file(f.name, content, file_type="code")
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error indexing file {f.name} from github repo", exc_info=True)
             continue
 
-    graph_result = session.graphify.build_graphify_pipeline()
-    session.vector_engine.build_index()
+    graph_result = await asyncio.to_thread(session.graphify.build_graphify_pipeline)
+    await asyncio.to_thread(session.vector_engine.build_index)
     session.files_count = len(files)
 
     return IngestResponse(
@@ -154,12 +160,12 @@ def ingest_github_repo(req: IngestGitHubRequest):
 
 
 @app.post("/api/ingest/files", response_model=IngestResponse)
-def ingest_files(req: IngestFilesRequest):
+async def ingest_files(req: IngestFilesRequest):
     """Ingests uploaded files into Graphify and LlamaIndex engines."""
     if not req.files:
         raise HTTPException(status_code=400, detail="No files provided.")
 
-    session = get_or_create_session()
+    session = await get_or_create_session()
     session.graphify.clear()
     session.vector_engine.clear()
 
@@ -176,8 +182,8 @@ def ingest_files(req: IngestFilesRequest):
             session.graphify.add_file(item.filename, item.content)
             session.vector_engine.add_file(item.filename, item.content, file_type="code")
 
-    graph_result = session.graphify.build_graphify_pipeline()
-    session.vector_engine.build_index()
+    graph_result = await asyncio.to_thread(session.graphify.build_graphify_pipeline)
+    await asyncio.to_thread(session.vector_engine.build_index)
     session.files_count = len(req.files)
 
     return IngestResponse(
@@ -193,9 +199,9 @@ def ingest_files(req: IngestFilesRequest):
 
 
 @app.get("/api/graph/{session_id}", response_model=GraphDataResponse)
-def get_graph_data(session_id: str):
+async def get_graph_data(session_id: str):
     """Returns serialized graph nodes and edges for client rendering."""
-    artifacts = storage.get_artifacts(session_id)
+    artifacts = await asyncio.to_thread(storage.get_artifacts, session_id)
     if artifacts and artifacts.get("graph_json"):
         try:
             raw = json.loads(artifacts["graph_json"])
@@ -208,21 +214,22 @@ def get_graph_data(session_id: str):
                 for e in raw.get("links", raw.get("edges", []))
             ]
             return GraphDataResponse(session_id=session_id, nodes=nodes, edges=edges)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error parsing graph JSON for session {session_id}", exc_info=True)
             pass
 
     if session_id in SESSIONS:
         session = SESSIONS[session_id]
-        data = session.graphify.to_graph_data()
+        data = await asyncio.to_thread(session.graphify.to_graph_data)
         return GraphDataResponse(session_id=session_id, nodes=data["nodes"], edges=data["edges"])
 
     raise HTTPException(status_code=404, detail="Session not found or expired.")
 
 
 @app.get("/api/graph/{session_id}/html", response_class=HTMLResponse)
-def get_graph_html(session_id: str):
+async def get_graph_html(session_id: str):
     """Serves Graphify's official interactive graph.html visualization."""
-    artifacts = storage.get_artifacts(session_id)
+    artifacts = await asyncio.to_thread(storage.get_artifacts, session_id)
     if artifacts and artifacts.get("graph_html"):
         return HTMLResponse(content=artifacts["graph_html"])
 
@@ -238,9 +245,9 @@ def get_graph_html(session_id: str):
 
 
 @app.get("/api/graph/{session_id}/report")
-def get_graph_report(session_id: str):
+async def get_graph_report(session_id: str):
     """Returns GRAPH_REPORT.md content for a session."""
-    artifacts = storage.get_artifacts(session_id)
+    artifacts = await asyncio.to_thread(storage.get_artifacts, session_id)
     if artifacts and artifacts.get("graph_report_md"):
         return {"session_id": session_id, "report": artifacts["graph_report_md"]}
 
@@ -255,10 +262,10 @@ async def chat_stream(req: ChatStreamRequest):
     """Server-Sent Events (SSE) token streaming endpoint for LangGraph agent reasoning."""
     if req.session_id not in SESSIONS:
         # Attempt to recover from SQLite
-        sess_record = storage.get_session(req.session_id)
+        sess_record = await asyncio.to_thread(storage.get_session, req.session_id)
         if not sess_record:
             raise HTTPException(status_code=404, detail="Session not found or expired. Please ingest a codebase first.")
-        get_or_create_session(req.session_id)
+        await get_or_create_session(req.session_id)
 
     # Resolve API Key
     api_key = req.api_key.strip() if req.api_key else ""

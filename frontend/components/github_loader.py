@@ -6,6 +6,7 @@ Supports:
 - GitHub Gist importing
 - Optional Personal Access Token (PAT) for private repos & rate limit bypass
 """
+import asyncio
 import streamlit as st
 from streamlit_tree_select import tree_select
 from core.github_service import GitHubService
@@ -48,7 +49,7 @@ def render_github_loader():
         gist_id = GitHubService.parse_gist_url(url)
         if gist_id:
             with st.spinner("Fetching Gist files..."):
-                files, err = GitHubService.fetch_gist(gist_id, token=active_token)
+                files, err = asyncio.run(GitHubService.fetch_gist(gist_id, token=active_token))
                 if files:
                     added = 0
                     for f in files:
@@ -72,7 +73,7 @@ def render_github_loader():
         # 2a. Single file direct fetch
         if path and not path.endswith('/'):
             with st.spinner(f"Fetching {path}..."):
-                fobj, err = GitHubService.fetch_raw_file(owner, repo, path, branch=branch, token=active_token)
+                fobj, err = asyncio.run(GitHubService.fetch_raw_file(owner, repo, path, branch=branch, token=active_token))
                 if fobj:
                     if not any(existing.name == fobj.name for existing in st.session_state.uploaded_files):
                         st.session_state.uploaded_files.append(fobj)
@@ -88,9 +89,9 @@ def render_github_loader():
         with st.spinner(f"Loading repository tree for {owner}/{repo} ({branch})..."):
             actual_branch = branch
             if branch == 'main':
-                actual_branch = GitHubService.fetch_default_branch(owner, repo, token=active_token)
+                actual_branch = asyncio.run(GitHubService.fetch_default_branch(owner, repo, token=active_token))
 
-            tree, err = GitHubService.fetch_repo_tree(owner, repo, actual_branch, token=active_token)
+            tree, err = asyncio.run(GitHubService.fetch_repo_tree(owner, repo, actual_branch, token=active_token))
             if tree:
                 st.session_state.repo_info = {'owner': owner, 'repo': repo, 'branch': actual_branch}
                 st.session_state.raw_tree = tree
@@ -118,13 +119,13 @@ def render_github_loader():
                 # Filter out folder paths (only fetch files)
                 file_paths = [p for p in checked_paths if '.' in p.split('/')[-1]]
                 with st.spinner(f"Downloading {len(file_paths)} files..."):
-                    downloaded, errors = GitHubService.fetch_multiple_files(
+                    downloaded, errors = asyncio.run(GitHubService.fetch_multiple_files(
                         info['owner'],
                         info['repo'],
                         file_paths,
                         branch=info['branch'],
                         token=active_token
-                    )
+                    ))
                     added = 0
                     for f in downloaded:
                         if not any(existing.name == f.name for existing in st.session_state.uploaded_files):

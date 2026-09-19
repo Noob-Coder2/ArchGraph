@@ -35,7 +35,7 @@ class APIClient:
             payload["files"].append({"filename": name, "content": content})
 
         try:
-            res = requests.post(url, json=payload, timeout=60)
+            res = requests.post(url, json=payload, timeout=(10, 600))
             if res.status_code == 200:
                 return res.json()
             return None
@@ -45,7 +45,7 @@ class APIClient:
     def get_graph_data_backend(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Fetches graph nodes and edges from FastAPI backend."""
         try:
-            res = requests.get(f"{self.base_url}/api/graph/{session_id}", timeout=10)
+            res = requests.get(f"{self.base_url}/api/graph/{session_id}", timeout=(10, 60))
             if res.status_code == 200:
                 return res.json()
             return None
@@ -55,7 +55,7 @@ class APIClient:
     def get_graph_html_backend(self, session_id: str) -> Optional[str]:
         """Fetches pre-rendered Graphify graph.html from backend."""
         try:
-            res = requests.get(f"{self.base_url}/api/graph/{session_id}/html", timeout=10)
+            res = requests.get(f"{self.base_url}/api/graph/{session_id}/html", timeout=(10, 60))
             if res.status_code == 200:
                 return res.text
             return None
@@ -65,7 +65,7 @@ class APIClient:
     def get_graph_report_backend(self, session_id: str) -> Optional[str]:
         """Fetches GRAPH_REPORT.md markdown from backend."""
         try:
-            res = requests.get(f"{self.base_url}/api/graph/{session_id}/report", timeout=10)
+            res = requests.get(f"{self.base_url}/api/graph/{session_id}/report", timeout=(10, 60))
             if res.status_code == 200:
                 return res.json().get("report", "")
             return None

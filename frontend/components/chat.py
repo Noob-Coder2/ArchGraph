@@ -23,7 +23,7 @@ def stream_sse_tokens(api_base_url: str, session_id: str, messages: List[Dict], 
     }
 
     try:
-        with requests.post(url, json=payload, stream=True, timeout=60) as resp:
+        with requests.post(url, json=payload, stream=True, timeout=(10, 600)) as resp:
             if resp.status_code != 200:
                 yield f"⚠️ API Error ({resp.status_code}): {resp.text}"
                 return

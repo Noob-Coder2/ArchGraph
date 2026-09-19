@@ -9,7 +9,7 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-Agentic%20SSE-black)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-**DocuStream Pro** is a modern, production-grade **Codebase Intelligence & Document Consolidation Platform**. It seamlessly bridges multi-modal document processing with state-of-the-art **Dual-Pillar GraphRAG**:
+**DocuStream** is a modern, production-grade **Codebase Intelligence & Document Consolidation Platform**. It seamlessly bridges multi-modal document processing with state-of-the-art **Dual-Pillar GraphRAG**:
 1. **Structural Code Graph (Graphify)**: Multi-language Tree-Sitter AST parsing, Louvain community clustering, central God Node detection, and interactive graph exploration.
 2. **Semantic Knowledge Base (LlamaIndex + FastEmbed)**: 100% local, zero-token cost vector embeddings over Markdown documentation, specifications, and extracted PDF pages.
 3. **Agentic Reasoning (LangGraph)**: Multi-provider reasoning agent (Groq, NVIDIA NIM, Anthropic Claude, OpenAI) streaming live reasoning steps and tokens via Server-Sent Events (SSE).

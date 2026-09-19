@@ -13,7 +13,7 @@ from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Optional, As
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain.agents import create_agent
-
+from langgraph.graph import StateGraph, START, END
 
 def get_chat_model(provider: str, model_name: str, api_key: str):
     """Instantiates the official provider ChatModel class."""
@@ -24,35 +24,47 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
         return ChatNVIDIA(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2
+            temperature=0.2,
+            top_p=0.9,
+            max_completion_tokens=16384,
+            timeout=600
         )
     elif "groq" in prov:
         from langchain_groq import ChatGroq
         return ChatGroq(
             model_name=model_name,
             groq_api_key=api_key.strip(),
-            temperature=0.2
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=16384,
+            timeout=600
         )
     elif "anthropic" in prov or "claude" in prov:
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2
+            temperature=0.2,
+            max_tokens=8192,
+            timeout=600
         )
     elif "openai" in prov:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2
+            temperature=0.2,
+            max_tokens=16384,
+            timeout=600
         )
     else:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2
+            temperature=0.2,
+            max_tokens=16384,
+            timeout=600
         )
 
 
@@ -102,15 +114,77 @@ class CodebaseAgent:
         return [graphify_query, graphify_path, graphify_explain, search_knowledge_base]
 
     def build_agent_graph(self, model_name: str, api_key: str, provider: str = "nvidia", system_prompt: str = ""):
-        """Compiles the LangGraph agent using create_agent."""
+        """Compiles a LangGraph Multi-Agent Supervisor pattern."""
+        import operator
+        from typing import Annotated, Sequence, TypedDict, Literal
+        
+        class AgentState(TypedDict):
+            messages: Annotated[Sequence[BaseMessage], operator.add]
+            next: str
+
         tools = self._build_tools()
+        architect_tools = [tools[0], tools[1], tools[2]]
+        researcher_tools = [tools[3]]
+
         llm = get_chat_model(provider, model_name, api_key)
         
-        return create_agent(
+        architect_agent = create_agent(
             model=llm,
-            tools=tools,
-            system_prompt=system_prompt
+            tools=architect_tools,
+            system_prompt="You are the Architect Subagent. Your job is to use Graphify tools to analyze code structure, call flows, and God Nodes. Provide clear, citation-rich answers based on graph traversals."
         )
+
+        researcher_agent = create_agent(
+            model=llm,
+            tools=researcher_tools,
+            system_prompt="You are the Researcher Subagent. Your job is to search the knowledge base for PRDs, documentation, PDF specs, and code comments to answer semantic questions."
+        )
+
+        async def architect_node(state: AgentState):
+            result = await architect_agent.ainvoke({"messages": state["messages"]})
+            return {"messages": [AIMessage(content=result["messages"][-1].content, name="Architect")]}
+
+        async def researcher_node(state: AgentState):
+            result = await researcher_agent.ainvoke({"messages": state["messages"]})
+            return {"messages": [AIMessage(content=result["messages"][-1].content, name="Researcher")]}
+
+        async def supervisor_node(state: AgentState):
+            prompt = (
+                f"{system_prompt}\n\n"
+                "You are a Supervisor Agent orchestrating an Architect and a Researcher.\n"
+                "Architect: maps call flows, dependencies, architecture, God Nodes.\n"
+                "Researcher: searches semantic docs, PRDs, code comments.\n"
+                "If the user's request requires structural info, reply EXACTLY with 'Architect'.\n"
+                "If it requires documentation info, reply EXACTLY with 'Researcher'.\n"
+                "If the request is fully answered or just general chatting, reply EXACTLY with 'FINISH'.\n"
+                "DO NOT output anything else."
+            )
+            messages = [SystemMessage(content=prompt)] + list(state["messages"])
+            response = await llm.ainvoke(messages)
+            next_worker = response.content.strip()
+            
+            if "Architect" in next_worker:
+                return {"next": "Architect"}
+            elif "Researcher" in next_worker:
+                return {"next": "Researcher"}
+            else:
+                return {"next": "FINISH"}
+
+        workflow = StateGraph(AgentState)
+        workflow.add_node("Architect", architect_node)
+        workflow.add_node("Researcher", researcher_node)
+        workflow.add_node("Supervisor", supervisor_node)
+        
+        workflow.add_edge("Architect", "Supervisor")
+        workflow.add_edge("Researcher", "Supervisor")
+        workflow.add_conditional_edges("Supervisor", lambda x: x["next"], {
+            "Architect": "Architect",
+            "Researcher": "Researcher",
+            "FINISH": END
+        })
+        workflow.add_edge(START, "Supervisor")
+        
+        return workflow.compile()
 
     async def stream_reasoning(
         self,

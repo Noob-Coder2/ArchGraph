@@ -1,6 +1,7 @@
 """
 Unit tests for LangGraph CodebaseAgent orchestrator and tool binding across providers.
 """
+import asyncio
 import pytest
 from api.graphify_engine import GraphifyEngine
 from api.llamaindex_engine import LlamaIndexEngine
@@ -44,7 +45,6 @@ class TestCodebaseAgent:
 
         # Verify LangGraph compiled state graph
         assert app_graph is not None
-        assert agent.checkpointer is not None
 
         # Verify tool definitions
         tools = agent._build_tools()
@@ -56,5 +56,6 @@ class TestCodebaseAgent:
 
         # Verify tool execution
         explain_tool = next(t for t in tools if t.name == "graphify_explain")
-        overview = explain_tool.invoke({"symbol": "NonExistent"})
+        overview = asyncio.run(explain_tool.ainvoke({"symbol": "NonExistent"}))
         assert "not found" in overview or "empty" in overview
+

@@ -10,6 +10,7 @@ import os
 import json
 import pytest
 import tempfile
+import asyncio
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -160,7 +161,7 @@ class TestAgentNativeTools:
 
         # Execute search_knowledge_base tool directly
         kb_tool = next(t for t in tools if t.name == "search_knowledge_base")
-        res = kb_tool.invoke({"query": "System return 42"})
+        res = asyncio.run(kb_tool.ainvoke({"query": "System return 42"}))
         assert "spec.md" in res
 
 

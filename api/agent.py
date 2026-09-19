@@ -7,19 +7,12 @@ Binds dedicated native tools for Graphify GraphRAG and LlamaIndex Vector Retriev
 4. search_knowledge_base: Dense semantic retrieval over documentation, PDFs, and code chunks
 Streams reasoning events and tokens over Server-Sent Events (SSE) via LangGraph astream_events v2.
 """
+import asyncio
 import json
 from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Optional, AsyncGenerator
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.checkpoint.memory import MemorySaver
-
-
-class AgentState(TypedDict):
-    """LangGraph agent state schema with message reducer."""
-    messages: Annotated[Sequence[BaseMessage], add_messages]
+from langchain.agents import create_agent
 
 
 def get_chat_model(provider: str, model_name: str, api_key: str):
@@ -69,7 +62,6 @@ class CodebaseAgent:
     def __init__(self, graph_engine: Any, vector_engine: Any):
         self.graph_engine = graph_engine
         self.vector_engine = vector_engine
-        self.checkpointer = MemorySaver()
 
     def _build_tools(self) -> list:
         """Defines and binds tools using LangChain's @tool decorator."""
@@ -77,28 +69,28 @@ class CodebaseAgent:
         vector = self.vector_engine
 
         @tool
-        def graphify_query(question: str, mode: str = "bfs") -> str:
+        async def graphify_query(question: str, mode: str = "bfs") -> str:
             """Searches the codebase structural knowledge graph using BFS (broad architectural context)
             or DFS (deep execution paths) across functional communities and call flows."""
-            return graph.query_traversal(question, mode=mode)
+            return await asyncio.to_thread(graph.query_traversal, question, mode=mode)
 
         @tool
-        def graphify_path(source_symbol: str, target_symbol: str) -> str:
+        async def graphify_path(source_symbol: str, target_symbol: str) -> str:
             """Finds the shortest dependency or call-chain path between two symbols, classes, or modules
             in the codebase knowledge graph."""
-            return graph.find_path(source_symbol, target_symbol)
+            return await asyncio.to_thread(graph.find_path, source_symbol, target_symbol)
 
         @tool
-        def graphify_explain(symbol: str) -> str:
+        async def graphify_explain(symbol: str) -> str:
             """Performs a structural audit of a specific class, function, or central God Node,
             revealing its degree centrality, callers, callees, and community module."""
-            return graph.explain_symbol(symbol)
+            return await asyncio.to_thread(graph.explain_symbol, symbol)
 
         @tool
-        def search_knowledge_base(query: str, doc_type: Optional[str] = None) -> str:
+        async def search_knowledge_base(query: str, doc_type: Optional[str] = None) -> str:
             """Performs dense semantic vector search across documentation (Markdown, text, extracted PDF pages)
             and code comments to find conceptual explanations, requirements, and logic passages."""
-            results = vector.retrieve(query, top_k=4, file_type=doc_type)
+            results = await asyncio.to_thread(vector.retrieve, query, top_k=4, file_type=doc_type)
             if not results:
                 return "No matching documentation or code passages found for this query."
             formatted = []
@@ -109,26 +101,16 @@ class CodebaseAgent:
 
         return [graphify_query, graphify_path, graphify_explain, search_knowledge_base]
 
-    def build_agent_graph(self, model_name: str, api_key: str, provider: str = "nvidia"):
-        """Compiles the LangGraph StateGraph using the appropriate provider ChatModel."""
+    def build_agent_graph(self, model_name: str, api_key: str, provider: str = "nvidia", system_prompt: str = ""):
+        """Compiles the LangGraph agent using create_agent."""
         tools = self._build_tools()
         llm = get_chat_model(provider, model_name, api_key)
-        llm_with_tools = llm.bind_tools(tools)
-
-        async def agent_node(state: AgentState):
-            messages = state["messages"]
-            response = await llm_with_tools.ainvoke(messages)
-            return {"messages": [response]}
-
-        workflow = StateGraph(AgentState)
-        workflow.add_node("agent", agent_node)
-        workflow.add_node("tools", ToolNode(tools))
-
-        workflow.add_edge(START, "agent")
-        workflow.add_conditional_edges("agent", tools_condition, ["tools", END])
-        workflow.add_edge("tools", "agent")
-
-        return workflow.compile(checkpointer=self.checkpointer)
+        
+        return create_agent(
+            model=llm,
+            tools=tools,
+            system_prompt=system_prompt
+        )
 
     async def stream_reasoning(
         self,
@@ -151,9 +133,9 @@ class CodebaseAgent:
             "Cite files, classes, and line contexts accurately."
         )
 
-        app_graph = self.build_agent_graph(model_name, api_key, provider)
+        app_graph = self.build_agent_graph(model_name, api_key, provider, system_prompt=system_instructions)
 
-        lc_messages = [SystemMessage(content=system_instructions)]
+        lc_messages = []
         for m in messages:
             if m["role"] == "user":
                 lc_messages.append(HumanMessage(content=m["content"]))
@@ -161,7 +143,6 @@ class CodebaseAgent:
                 lc_messages.append(AIMessage(content=m["content"]))
 
         config = {
-            "configurable": {"thread_id": session_id},
             "recursion_limit": 15
         }
 

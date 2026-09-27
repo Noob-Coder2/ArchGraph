@@ -49,6 +49,7 @@ class ChatStreamRequest(BaseModel):
     model: str = Field("nvidia/nemotron-3.5-lightning-30b-a3b", description="Model identifier")
     api_key: str = Field(..., description="Provider API key (NVIDIA NIM or Groq)")
     provider: str = Field("nvidia", description="Provider name ('nvidia', 'groq', 'anthropic', or 'openai')")
+    is_first_call: bool = Field(False, description="Whether this is the first chat request in the session")
 
 
 class ReportRequest(BaseModel):

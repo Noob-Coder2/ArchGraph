@@ -22,6 +22,14 @@ class APIClient:
         except Exception:
             return False
 
+    def check_session_status(self, session_id: str) -> bool:
+        """Checks if a session is still active on the backend."""
+        try:
+            res = requests.get(f"{self.base_url}/api/session/{session_id}/status", timeout=2.0)
+            return res.status_code == 200
+        except Exception:
+            return False
+
     def ingest_files_backend(self, files: List[Any]) -> Optional[Dict[str, Any]]:
         """
         Sends uploaded files to FastAPI backend for Dual-Pillar indexing.

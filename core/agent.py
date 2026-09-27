@@ -16,6 +16,25 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 
+def _sse_token(text: str) -> str:
+    """One SSE frame carrying answer/activity text (real newlines survive JSON encoding)."""
+    return f"data: {json.dumps({'token': text})}\n\n"
+
+
+def _content_text(content: Any) -> str:
+    """Plain text from str content or a list of content blocks - never a Python repr."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            b if isinstance(b, str)
+            else (b.get("text", "") if isinstance(b, dict) and b.get("type", "text") == "text" else "")
+            for b in content
+        )
+    return "" if content is None else str(content)
+
+
+
 def get_chat_model(provider: str, model_name: str, api_key: str):
     """Instantiates the official provider ChatModel class."""
     prov = provider.lower()
@@ -25,47 +44,47 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
         return ChatNVIDIA(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2,
-            top_p=0.9,
-            max_completion_tokens=16384,
-            timeout=600
+            temperature=0.1,
+            top_p=0.8,
+            max_completion_tokens=8192,
+            timeout=120
         )
     elif "groq" in prov:
         from langchain_groq import ChatGroq
         return ChatGroq(
             model_name=model_name,
             groq_api_key=api_key.strip(),
-            temperature=0.2,
-            top_p=0.9,
-            max_tokens=16384,
-            timeout=600
+            temperature=0.1,
+            top_p=0.8,
+            max_tokens=8192,
+            timeout=120
         )
     elif "anthropic" in prov or "claude" in prov:
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=8192,
-            timeout=600
+            timeout=120
         )
     elif "openai" in prov:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2,
-            max_tokens=16384,
-            timeout=600
+            temperature=0.1,
+            max_tokens=8192,
+            timeout=120
         )
     else:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model_name,
             api_key=api_key.strip(),
-            temperature=0.2,
-            max_tokens=16384,
-            timeout=600
+            temperature=0.1,
+            max_tokens=8192,
+            timeout=120
         )
 
 
@@ -75,11 +94,19 @@ class CodebaseAgent:
     def __init__(self, graph_engine: Any, vector_engine: Any):
         self.graph_engine = graph_engine
         self.vector_engine = vector_engine
+        self._compiled_agent = None
+        self._last_model_key = None
+        self._last_system_prompt = None
 
     def _build_tools(self) -> list:
         """Defines and binds base tools using LangChain's @tool decorator."""
         graph = self.graph_engine
         vector = self.vector_engine
+
+        @tool
+        async def read_codebase_context() -> str:
+            """Reads the architectural report and condensed graph summary to orient the agent on the codebase."""
+            return await asyncio.to_thread(graph.get_architectural_summary)
 
         @tool
         async def graphify_query(question: str, mode: str = "bfs") -> str:
@@ -103,7 +130,7 @@ class CodebaseAgent:
         async def search_knowledge_base(query: str, doc_type: Optional[str] = None) -> str:
             """Performs dense semantic vector search across documentation (Markdown, text, extracted PDF pages)
             and code comments to find conceptual explanations, requirements, and logic passages."""
-            results = await asyncio.to_thread(vector.retrieve, query, top_k=4, file_type=doc_type)
+            results = await asyncio.to_thread(vector.retrieve, query, top_k=6, file_type=doc_type)
             if not results:
                 return "No matching documentation or code passages found for this query."
             formatted = []
@@ -175,145 +202,79 @@ class CodebaseAgent:
                 return "No files currently indexed in the repository."
             return "### Indexed Repository Files:\n" + "\n".join(f"- `{f}`" for f in sorted(files)[:100])
 
-        @tool
-        async def get_architecture_overview() -> str:
-            """Retrieves the high-level Graphify architectural report, including entity counts,
-            detected cohesive functional communities, and central God Nodes."""
-            return await asyncio.to_thread(graph.get_architectural_summary)
-
         return [
+            read_codebase_context,
             graphify_query,
             graphify_path,
             graphify_explain,
             search_knowledge_base,
             read_source_file,
-            list_repo_files,
-            get_architecture_overview
+            list_repo_files
         ]
 
-    def build_agent_graph(self, model_name: str, api_key: str, provider: str = "nvidia", system_prompt: str = ""):
+    def get_or_build_agent(self, model_name: str, api_key: str, provider: str = "nvidia", is_first_call: bool = False):
         """
-        Compiles a Subagents-as-Tools architecture.
-        A central Supervisor coordinates stateless specialized subagents (Architect, Researcher,
-        Bug Finder, Logic Break Finder) by invoking them as tools.
-        All agents are compiled via official create_agent() without custom StateGraph glue.
+        Compiles the agent graph or returns the cached version.
+        Uses a flattened tool structure with a single supervisor and one optional deep analysis subagent.
         """
+        model_key = f"{provider}:{model_name}"
+        
+        # Use conditional prompt instruction for first call
+        first_call_instruction = (
+            "IMPORTANT: As this is your first interaction, you MUST call `read_codebase_context` before answering ANY question. "
+            "This loads the architectural report and graph summary you need to reason about the codebase.\n\n"
+        ) if is_first_call else ""
+
+        supervisor_instructions = (
+            "You are DocuStream Intelligent Agent, an expert software architect and codebase assistant.\n"
+            f"{first_call_instruction}"
+            "Workflow Guidelines:\n"
+            "1. For most questions, use your direct tools (search_knowledge_base, graphify_query, etc.) to inspect files, structure, or content.\n"
+            "2. Semantic search (search_knowledge_base) is a great starting point to find relevant file/symbol names.\n"
+            "3. Use graph traversal (graphify_query, graphify_path, graphify_explain) to understand relationships and structure.\n"
+            "4. Only delegate to `ask_deep_analysis_agent` for complex questions requiring cross-cutting multi-tool investigation.\n"
+            "5. Always ground your claims with concrete citations (file names, line numbers, function names).\n"
+        )
+
+        if self._compiled_agent and self._last_model_key == model_key and self._last_system_prompt == supervisor_instructions:
+            return self._compiled_agent
+
         tools = self._build_tools()
-        graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files, arch_overview = tools
+        read_context, graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files = tools
 
         llm = get_chat_model(provider, model_name, api_key)
 
-        # 1. Specialized Subagents
-        architect_agent = create_agent(
+        # 1. Optional Deep Analysis Subagent
+        deep_analysis_agent = create_agent(
             model=llm,
-            tools=[graphify_query, graphify_path, graphify_explain, arch_overview],
+            tools=[graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files],
             system_prompt=(
-                "You are the Architect Subagent, specialized in software architecture, dependency call graphs, "
-                "God Nodes, circular dependencies, modular architecture, and structural code relationships. "
-                "Use Graphify tools to thoroughly trace call-flows and dependencies. "
-                "Return a comprehensive, detailed architectural analysis with file and symbol citations."
+                "You are the Deep Analysis Subagent, specialized in complex, cross-cutting investigations. "
+                "Use your tools to thoroughly trace dependencies, find bugs, or audit logic breaks. "
+                "Return a comprehensive, detailed analysis with file and symbol citations."
             )
         )
 
-        researcher_agent = create_agent(
-            model=llm,
-            tools=[search_kb],
-            system_prompt=(
-                "You are the Researcher Subagent, specialized in retrieving and synthesizing documentation, "
-                "product requirements documents (PRDs), PDF specifications, feature designs, and code comments. "
-                "Use search_knowledge_base to locate relevant requirements, specs, and conceptual context. "
-                "Return a well-structured summary citing source files, pages, and passages."
-            )
-        )
-
-        bug_finder_agent = create_agent(
-            model=llm,
-            tools=[read_file, graphify_explain, search_kb, list_files],
-            system_prompt=(
-                "You are the Bug Finder Subagent, specialized in identifying code bugs, runtime exceptions, "
-                "unhandled error states, missing null/None validations, edge-case failures, type mismatches, "
-                "resource leaks, and broken imports across the codebase. "
-                "Use read_source_file and graphify_explain to inspect suspect implementations and trace error paths. "
-                "Clearly cite the exact file, lines, root cause, and concrete fixes."
-            )
-        )
-
-        logic_break_finder_agent = create_agent(
-            model=llm,
-            tools=[read_file, graphify_path, graphify_query, search_kb, list_files],
-            system_prompt=(
-                "You are the Logic Break Finder Subagent, specialized in discovering 'what doesn't make sense in the repo'. "
-                "Audit discrepancies between documentation/PRDs and actual code implementations, dead code paths, "
-                "architectural anti-patterns, disconnected event loops, missing glue wiring, and functions called with invalid contracts. "
-                "Cross-examine the knowledge base and source files to point out logical contradictions and structural gaps."
-            )
-        )
-
-        # 2. Wrap Subagents as Tools for the Supervisor
         @tool
-        async def ask_architect_agent(query: str) -> str:
-            """Consults the Architect Subagent to analyze codebase structure, God Nodes, call graphs, module coupling, and dependency paths.
+        async def ask_deep_analysis_agent(query: str) -> str:
+            """Consults the Deep Analysis Subagent for complex, multi-step investigations requiring cross-cutting analysis of architecture, logic breaks, or bugs.
 
             Args:
-                query: The specific structural question or architectural analysis to perform.
+                query: The specific complex investigation to perform.
             """
-            result = await architect_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
-            return result["messages"][-1].content
-
-        @tool
-        async def ask_researcher_agent(query: str) -> str:
-            """Consults the Researcher Subagent to retrieve and synthesize documentation, PRDs, PDF specifications, requirements, and design docs.
-
-            Args:
-                query: The documentation or requirement research query.
-            """
-            result = await researcher_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
-            return result["messages"][-1].content
-
-        @tool
-        async def ask_bug_finder_agent(query: str) -> str:
-            """Consults the Bug Finder Subagent to detect bugs, runtime exceptions, unhandled errors, missing checks, edge-case failures, and resource leaks.
-
-            Args:
-                query: The specific bug audit or defect investigation request.
-            """
-            result = await bug_finder_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
-            return result["messages"][-1].content
-
-        @tool
-        async def ask_logic_break_finder_agent(query: str) -> str:
-            """Consults the Logic Break Finder Subagent to retrieve what doesn't make sense in the repo, including PRD vs code contradictions, dead code, anti-patterns, or disconnected wiring.
-
-            Args:
-                query: The logic audit or discrepancy investigation query.
-            """
-            result = await logic_break_finder_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
+            result = await deep_analysis_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
             return result["messages"][-1].content
 
         supervisor_tools = [
-            ask_architect_agent,
-            ask_researcher_agent,
-            ask_bug_finder_agent,
-            ask_logic_break_finder_agent,
+            read_context,
+            graphify_query,
+            graphify_path,
+            graphify_explain,
+            search_kb,
             read_file,
             list_files,
-            arch_overview
+            ask_deep_analysis_agent
         ]
-
-        supervisor_instructions = (
-            f"{system_prompt}\n\n"
-            "You are the Lead Supervisor Agent coordinating a specialized team of expert subagents:\n"
-            "- Architect Subagent (ask_architect_agent): For codebase structure, call graphs, dependencies, and God Nodes.\n"
-            "- Researcher Subagent (ask_researcher_agent): For documentation, PRD specs, requirements, and project purpose.\n"
-            "- Bug Finder Subagent (ask_bug_finder_agent): For detecting bugs, exceptions, and unhandled errors.\n"
-            "- Logic Break Finder Subagent (ask_logic_break_finder_agent): For detecting contradictions, broken logic, and 'what doesn't make sense in the repo'.\n"
-            "- Direct Tools (read_source_file, list_repo_files, get_architecture_overview): To inspect file trees, overview, or exact source lines.\n\n"
-            "Workflow Guidelines:\n"
-            "1. When answering complex or broad questions (e.g., 'what is not working, how to improve it, or purpose'), delegate sub-inquiries to the relevant subagents.\n"
-            "2. You can call multiple subagents sequentially or in combination.\n"
-            "3. Synthesize the subagents' findings into a cohesive, structured, citation-rich response with markdown headings, code snippets, and actionable recommendations.\n"
-            "4. Always ground your claims with concrete citations (file names, line numbers, function names)."
-        )
 
         supervisor_agent = create_agent(
             model=llm,
@@ -321,6 +282,9 @@ class CodebaseAgent:
             system_prompt=supervisor_instructions
         )
 
+        self._compiled_agent = supervisor_agent
+        self._last_model_key = model_key
+        self._last_system_prompt = supervisor_instructions
         return supervisor_agent
 
     async def stream_reasoning(
@@ -329,20 +293,14 @@ class CodebaseAgent:
         model_name: str,
         api_key: str,
         provider: str = "nvidia",
-        session_id: str = "default_session"
+        session_id: str = "default_session",
+        is_first_call: bool = False
     ) -> AsyncGenerator[str, None]:
         """
         Streams reasoning and tool execution events over Server-Sent Events (SSE).
         Uses LangGraph v2 astream_events for token and tool event streaming.
         """
-        system_instructions = (
-            "You are DocuStream Intelligent Agent, an expert software architect and codebase assistant.\n"
-            "When answering technical questions, ALWAYS consult your specialized subagents to verify file contents, "
-            "logic breaks, bug potentials, and call flows before answering.\n"
-            "Cite files, classes, and line contexts accurately."
-        )
-
-        app_graph = self.build_agent_graph(model_name, api_key, provider, system_prompt=system_instructions)
+        app_graph = self.get_or_build_agent(model_name, api_key, provider, is_first_call=is_first_call)
 
         lc_messages = []
         for m in messages:
@@ -350,24 +308,28 @@ class CodebaseAgent:
                 lc_messages.append(HumanMessage(content=m["content"]))
             elif m["role"] == "assistant":
                 lc_messages.append(AIMessage(content=m["content"]))
+            elif m["role"] == "system":
+                lc_messages.append(SystemMessage(content=m["content"]))
 
         config = {
-            "recursion_limit": 30
+            "recursion_limit": 15
         }
 
         tool_badges = {
-            "ask_architect_agent": "🏛️ Architect Subagent: Analyzing structural call-flows & dependencies...",
-            "ask_researcher_agent": "📚 Researcher Subagent: Retrieving documentation & specs...",
-            "ask_bug_finder_agent": "🐛 Bug Finder Subagent: Auditing code for bugs & error handling...",
-            "ask_logic_break_finder_agent": "🔍 Logic Break Finder: Detecting discrepancies & logic breaks...",
-            "read_source_file": "📖 Reading source code lines...",
+            "ask_deep_analysis_agent": "🧠 Delegating to Deep Analysis Agent for cross-cutting investigation...",
+            "read_codebase_context": "📄 Loading codebase architecture context...",
+            "read_source_file": "📖 Reading source code lines",
             "list_repo_files": "📁 Listing repository files...",
-            "get_architecture_overview": "🏛️ Loading architectural graph overview...",
-            "graphify_query": "⚡ Traversing Code Graph (BFS/DFS)...",
-            "graphify_path": "⚡ Tracing Dependency Path...",
-            "graphify_explain": "⚡ Auditing Symbol Details...",
-            "search_knowledge_base": "📄 Searching Documentation & Vectors..."
+            "graphify_query": "⚡ Traversing Code Graph",
+            "graphify_path": "⚡ Tracing Dependency Path",
+            "graphify_explain": "⚡ Auditing Symbol Details",
+            "search_knowledge_base": "🔍 Searching knowledge base"
         }
+
+        # run_ids of in-flight `ask_deep_analysis_agent` calls. Model tokens whose ancestry
+        # (parent_ids) contains one of these come from the subagent's internal loop and must
+        # not reach the user: the supervisor writes the final answer itself.
+        delegate_runs = set()
 
         try:
             async for event in app_graph.astream_events(
@@ -380,18 +342,43 @@ class CodebaseAgent:
                 # 1. Stream tool execution indicators
                 if event_type == "on_tool_start":
                     tool_name = event.get("name", "tool")
+                    if tool_name == "ask_deep_analysis_agent":
+                        delegate_runs.add(event.get("run_id"))
+                    tool_input = event.get("data", {}).get("input", {})
+                    if not isinstance(tool_input, dict):
+                        tool_input = {}
+                    query_arg = tool_input.get("query") or tool_input.get("question") or tool_input.get("symbol", "")
                     badge = tool_badges.get(tool_name, f"Calling tool: `{tool_name}`...")
-                    yield f"data: {json.dumps({'token': f'\n\n*{badge}*\n\n'})}\n\n"
 
-                # 2. Stream generated LLM tokens from agent node
+                    if tool_name in ["read_codebase_context", "list_repo_files", "ask_deep_analysis_agent"]:
+                        yield _sse_token(f"\n\n*{badge}*\n\n")
+                    else:
+                        detail = f": '{query_arg}'" if query_arg else ""
+                        yield _sse_token(f"\n\n*{badge}{detail}*\n\n")
+
+                # 2. Stream generated LLM tokens (supervisor only)
                 elif event_type == "on_chat_model_stream":
+                    if delegate_runs.intersection(event.get("parent_ids") or ()):
+                        continue  # token from inside the subagent: don't stream it
                     chunk = event["data"].get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        token = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                        yield f"data: {json.dumps({'token': token})}\n\n"
+                    token = _content_text(getattr(chunk, "content", "")) if chunk else ""
+                    if token:
+                        yield _sse_token(token)
+
+                # 3. Stream tool end with brief result summary
+                elif event_type == "on_tool_end":
+                    tool_name = event.get("name", "tool")
+                    if tool_name == "ask_deep_analysis_agent":
+                        delegate_runs.discard(event.get("run_id"))
+                    else:
+                        output = event.get("data", {}).get("output", "")
+                        # v2 gives a ToolMessage: use its .content, not str(ToolMessage)
+                        text = " ".join(_content_text(getattr(output, "content", output)).split())
+                        summary = text[:150] + "..." if len(text) > 150 else text
+                        yield _sse_token(f"\n> {summary}\n\n")
+
 
             yield "data: [DONE]\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': f'LangGraph Agent Error ({provider}): {str(e)}'})}\n\n"
-

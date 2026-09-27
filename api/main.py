@@ -10,14 +10,22 @@ import os
 import uuid
 import time
 import asyncio
+import sys
+
+# Force ProactorEventLoop on Windows to prevent uvicorn from using SelectorEventLoop (which has a 512 FD limit and causes WinError 10055)
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pypdf import PdfReader
 
 # Load environment variables from .env
 load_dotenv()
@@ -38,7 +46,9 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="DocuStream Intelligence API",
     description="Dual-Pillar codebase intelligence engine using Graphify, LlamaIndex, and LangGraph.",
-    version="2.0.0"
+    version="2.0.0",
+    debug=False,
+    docs_url="/docs",
 )
 
 # Enable CORS for Streamlit frontend
@@ -69,9 +79,10 @@ SESSIONS: Dict[str, SessionContainer] = {}
 async def get_or_create_session(session_id: Optional[str] = None) -> SessionContainer:
     """Retrieves an existing session from memory/SQLite or provisions a new container."""
     now = time.time()
-    # Expire old in-memory references after 2 hours
-    expired = [sid for sid, s in SESSIONS.items() if now - s.last_active > 7200]
+    # Expire old in-memory references after 1 hour
+    expired = [sid for sid, s in SESSIONS.items() if now - s.last_active > 3600]
     for sid in expired:
+        await asyncio.to_thread(storage.delete_session, sid)
         del SESSIONS[sid]
 
     target_id = session_id or str(uuid.uuid4())
@@ -91,6 +102,21 @@ async def get_or_create_session(session_id: Optional[str] = None) -> SessionCont
 async def health_check():
     """Health check route reporting active sessions."""
     return {"status": "ok", "active_sessions": len(SESSIONS)}
+
+
+@app.get("/api/session/{session_id}/status")
+async def session_status(session_id: str):
+    """Checks if a session is still active or expired."""
+    sess_record = await asyncio.to_thread(storage.get_session, session_id)
+    if not sess_record:
+        raise HTTPException(status_code=410, detail="Session expired.")
+    now = time.time()
+    if now - sess_record['last_active'] > 3600:
+        await asyncio.to_thread(storage.delete_session, session_id)
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
+        raise HTTPException(status_code=410, detail="Session expired due to inactivity.")
+    return {"status": "active", "file_count": sess_record.get('file_count', 0)}
 
 
 @app.post("/api/ingest/github", response_model=IngestResponse)
@@ -135,7 +161,16 @@ async def ingest_github_repo(req: IngestGitHubRequest):
             elif ext in ['.md', '.txt', '.rst']:
                 session.vector_engine.add_file(f.name, content, file_type="document")
             elif ext == '.pdf':
-                session.vector_engine.add_file(f.name, content, file_type="pdf")
+                try:
+                    reader = PdfReader(f)
+                    pdf_content = ""
+                    for i, page in enumerate(reader.pages):
+                        text = page.extract_text() or ""
+                        pdf_content += f"--- [Page {i+1}] ---\n{text}\n\n"
+                    session.vector_engine.add_file(f.name, pdf_content.strip(), file_type="pdf")
+                except Exception as e:
+                    logger.warning(f"Could not parse PDF {f.name}, skipping: {e}")
+                    continue
             else:
                 session.graphify.add_file(f.name, content)
                 session.vector_engine.add_file(f.name, content, file_type="code")
@@ -264,7 +299,7 @@ async def chat_stream(req: ChatStreamRequest):
         # Attempt to recover from SQLite
         sess_record = await asyncio.to_thread(storage.get_session, req.session_id)
         if not sess_record:
-            raise HTTPException(status_code=404, detail="Session not found or expired. Please ingest a codebase first.")
+            raise HTTPException(status_code=410, detail="Session expired. Please ingest a codebase first.")
         await get_or_create_session(req.session_id)
 
     # Resolve API Key
@@ -292,7 +327,8 @@ async def chat_stream(req: ChatStreamRequest):
             model_name=req.model,
             api_key=api_key,
             provider=req.provider,
-            session_id=req.session_id
+            session_id=req.session_id,
+            is_first_call=req.is_first_call
         ),
         media_type="text/event-stream"
     )

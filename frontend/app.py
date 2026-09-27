@@ -63,6 +63,15 @@ def main():
         else:
             st.markdown('<span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b;border-color:rgba(245,158,11,0.3)">○ Standalone Mode</span>', unsafe_allow_html=True)
 
+    # Session Expiry Check
+    if st.session_state.backend_session_id:
+        if not api_client.check_session_status(st.session_state.backend_session_id) or st.session_state.get("session_expired"):
+            st.error("⚠️ **Session Expired.** This application is only for a demo. Contact the dev for more applications.\n\nPlease re-upload or re-import the codebase to start a new session.", icon="⏳")
+            st.session_state.backend_session_id = None
+            st.session_state.graph_data = {"nodes": [], "edges": []}
+            st.session_state.chat_messages = []
+            st.session_state.session_expired = False
+
     # --- Sidebar Controls ---
     with st.sidebar:
         st.subheader("🛠️ Ingestion Panel")
@@ -75,7 +84,8 @@ def main():
         if files:
             st.markdown("---")
             if st.button("⚡ Index for Graph & Chat", type="primary", use_container_width=True):
-                with st.spinner("Extracting AST Graph and indexing vector chunks..."):
+                approx_time = max(5, int(len(files) * 0.2))
+                with st.spinner(f"Extracting AST Graph and indexing vector chunks for better embeddings... (Approx. {approx_time}s)"):
                     result = api_client.ingest_files_backend(files)
                     if result and result.get("status") == "success":
                         st.session_state.backend_session_id = result["session_id"]

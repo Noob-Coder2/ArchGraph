@@ -163,8 +163,13 @@ class StorageEngine:
             cur = conn.execute("SELECT filepath, sha256_hash FROM file_manifests WHERE session_id = ?;", (session_id,))
             return {row['filepath']: row['sha256_hash'] for row in cur.fetchall()}
 
-    def cleanup_expired_sessions(self, max_age_seconds: int = 86400) -> int:
-        """Removes sessions that have been inactive longer than max_age_seconds (default 24h)."""
+    def delete_session(self, session_id: str):
+        """Deletes a session and all its cascading artifacts/manifests."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE session_id = ?;", (session_id,))
+
+    def cleanup_expired_sessions(self, max_age_seconds: int = 3600) -> int:
+        """Removes sessions that have been inactive longer than max_age_seconds (default 1h)."""
         cutoff = time.time() - max_age_seconds
         with self._get_connection() as conn:
             cur = conn.execute("DELETE FROM sessions WHERE last_active < ?;", (cutoff,))

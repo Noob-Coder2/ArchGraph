@@ -14,12 +14,12 @@ from llama_index.embeddings.fastembed import FastEmbedEmbedding
 class LlamaIndexEngine:
     """In-memory vector store manager for semantic retrieval over documentation and code."""
 
-    def __init__(self, embedding_model_name: str = "BAAI/bge-small-en-v1.5"):
+    def __init__(self, embedding_model_name: str = "BAAI/bge-large-en-v1.5"):
         self.embed_model = FastEmbedEmbedding(model_name=embedding_model_name)
         Settings.embed_model = self.embed_model
         Settings.llm = None  # Reasoning delegated to LangGraph
 
-        self.splitter = SentenceSplitter(chunk_size=750, chunk_overlap=80)
+        self.splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
         self.documents: List[Document] = []
         self.index: Optional[VectorStoreIndex] = None
 

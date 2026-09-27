@@ -11,7 +11,7 @@ import streamlit as st
 from typing import Generator, List, Dict
 
 
-def stream_sse_tokens(api_base_url: str, session_id: str, messages: List[Dict], model: str, api_key: str, provider: str) -> Generator[str, None, None]:
+def stream_sse_tokens(api_base_url: str, session_id: str, messages: List[Dict], model: str, api_key: str, provider: str, is_first_call: bool = False) -> Generator[str, None, None]:
     """Consumes Server-Sent Events from the FastAPI backend and yields text tokens."""
     url = f"{api_base_url}/api/chat/stream"
     payload = {
@@ -19,11 +19,16 @@ def stream_sse_tokens(api_base_url: str, session_id: str, messages: List[Dict], 
         "messages": messages,
         "model": model,
         "api_key": api_key,
-        "provider": provider
+        "provider": provider,
+        "is_first_call": is_first_call
     }
 
     try:
         with requests.post(url, json=payload, stream=True, timeout=(10, 600)) as resp:
+            if resp.status_code == 410:
+                st.session_state.session_expired = True
+                yield "⚠️ **Session Expired due to 1 hour of inactivity.** Please restart the session by re-uploading the codebase."
+                return
             if resp.status_code != 200:
                 yield f"⚠️ API Error ({resp.status_code}): {resp.text}"
                 return
@@ -160,9 +165,11 @@ def render_chat_interface(api_base_url: str = "http://localhost:8000"):
                 use_container_width=True
             )
 
-    # Initialize chat history
+    # Initialize chat history and call count
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = []
+    if "agent_call_count" not in st.session_state:
+        st.session_state.agent_call_count = 0
 
     # Display message history
     for message in st.session_state.chat_messages:
@@ -194,6 +201,10 @@ def render_chat_interface(api_base_url: str = "http://localhost:8000"):
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        # Increment call count
+        st.session_state.agent_call_count += 1
+        is_first_call = (st.session_state.agent_call_count == 1)
+
         # Stream response
         with st.chat_message("assistant"):
             stream_gen = stream_sse_tokens(
@@ -202,7 +213,8 @@ def render_chat_interface(api_base_url: str = "http://localhost:8000"):
                 messages=st.session_state.chat_messages,
                 model=selected_model,
                 api_key=active_key,
-                provider=provider_code
+                provider=provider_code,
+                is_first_call=is_first_call
             )
             response_text = st.write_stream(stream_gen)
 

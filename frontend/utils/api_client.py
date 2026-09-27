@@ -33,12 +33,17 @@ class APIClient:
     def ingest_files_backend(self, files: List[Any]) -> Optional[Dict[str, Any]]:
         """
         Sends uploaded files to FastAPI backend for Dual-Pillar indexing.
-        Extracts real text from PDFs via DocumentConsolidator before sending.
+
+        Rich document formats (.pdf, .docx, .pptx, .xlsx) are converted to
+        Markdown by DocumentConsolidator (backed by markitdown) before being
+        sent as JSON payloads so the backend receives clean, structured text.
+        Plain text and code files are read as UTF-8.
         """
         url = f"{self.base_url}/api/ingest/files"
         payload = {"files": []}
         for f in files:
             name = getattr(f, "name", "file.txt")
+            # read_file_content handles rich docs via markitdown and plain text via UTF-8
             content, _ = DocumentConsolidator.read_file_content(f)
             payload["files"].append({"filename": name, "content": content})
 

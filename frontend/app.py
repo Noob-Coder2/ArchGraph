@@ -12,7 +12,6 @@ load_dotenv()
 from frontend.styles.styles import apply_custom_styles
 from frontend.components.github_loader import render_github_loader
 from frontend.components.file_manager import render_file_manager
-from frontend.components.consolidator_ui import render_consolidator_ui
 from frontend.components.graph_view import render_code_graph_view
 from frontend.components.chat import render_chat_interface
 from frontend.utils.api_client import APIClient
@@ -54,7 +53,7 @@ def main():
     col_title, col_status = st.columns([4, 1])
     with col_title:
         st.title("⚡ DocuStream Pro")
-        st.caption("Document & Codebase Intelligence Platform — Graph Analysis, RAG, & Consolidation")
+        st.caption("Document & Codebase Intelligence Platform — Graph Analysis, RAG & Agent Intelligence")
 
     with col_status:
         is_backend_up = api_client.is_backend_alive()
@@ -103,14 +102,10 @@ def main():
                         st.error("Indexing failed. Ensure the FastAPI backend is running on :8000.")
 
     # --- Main Application Views ---
-    tab_consolidator, tab_graph, tab_chat = st.tabs([
-        "📄 Document Consolidator",
+    tab_graph, tab_chat = st.tabs([
         "🕸️ Code Graph (Graphify)",
         "🤖 Chat & Intelligence"
     ])
-
-    with tab_consolidator:
-        render_consolidator_ui()
 
     with tab_graph:
         render_code_graph_view(st.session_state.get("graph_data", {"nodes": [], "edges": []}))

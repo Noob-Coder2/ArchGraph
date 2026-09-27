@@ -29,7 +29,7 @@ def render_file_manager():
 
     # Drag and drop file uploader with cycled key
     uploaded = st.file_uploader(
-        "Upload local files (Code, Text, Markdown, PDF)",
+        "Upload local files (Code, Text, Markdown, PDF, DOCX, PPTX, XLSX)",
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state.uploader_key}"
     )

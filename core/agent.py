@@ -5,6 +5,7 @@ Binds dedicated native tools for Graphify GraphRAG and LlamaIndex Vector Retriev
 2. graphify_path: Shortest dependency and call-chain pathfinding
 3. graphify_explain: Deep symbol, caller, and callee audit
 4. search_knowledge_base: Dense semantic retrieval over documentation, PDFs, and code chunks
+5. consolidate_knowledge_graph: Generates an LLM-ready Markdown summary of god nodes & communities
 Streams reasoning events and tokens over Server-Sent Events (SSE) via LangGraph astream_events v2.
 """
 import asyncio
@@ -15,6 +16,7 @@ from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Optional, As
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain.agents import create_agent
+from services.consolidator import DocumentConsolidator
 
 def _sse_token(text: str) -> str:
     """One SSE frame carrying answer/activity text (real newlines survive JSON encoding)."""
@@ -202,6 +204,27 @@ class CodebaseAgent:
                 return "No files currently indexed in the repository."
             return "### Indexed Repository Files:\n" + "\n".join(f"- `{f}`" for f in sorted(files)[:100])
 
+        @tool
+        async def consolidate_files(file_paths: List[str], include_toc: bool = True) -> str:
+            """Reads and merges multiple indexed files into a single Markdown document.
+
+            Use this INSTEAD of calling read_source_file multiple times when you need
+            the content of several files — you get all content back in one tool call,
+            which significantly reduces latency.
+
+            Workflow tip: Use graphify_query, graphify_path, or graphify_explain to
+            discover which files are structurally related (same community, call chain,
+            or god-node dependencies), then pass those file paths here to consolidate
+            them efficiently.
+
+            Args:
+                file_paths:  List of file paths to read and merge (relative or absolute).
+                include_toc: Whether to include a Table of Contents header (default True).
+            """
+            return await asyncio.to_thread(
+                DocumentConsolidator.consolidate_files, graph, file_paths, include_toc
+            )
+
         return [
             read_codebase_context,
             graphify_query,
@@ -209,7 +232,8 @@ class CodebaseAgent:
             graphify_explain,
             search_knowledge_base,
             read_source_file,
-            list_repo_files
+            list_repo_files,
+            consolidate_files,
         ]
 
     def get_or_build_agent(self, model_name: str, api_key: str, provider: str = "nvidia", is_first_call: bool = False):
@@ -232,22 +256,24 @@ class CodebaseAgent:
             "1. For most questions, use your direct tools (search_knowledge_base, graphify_query, etc.) to inspect files, structure, or content.\n"
             "2. Semantic search (search_knowledge_base) is a great starting point to find relevant file/symbol names.\n"
             "3. Use graph traversal (graphify_query, graphify_path, graphify_explain) to understand relationships and structure.\n"
-            "4. Only delegate to `ask_deep_analysis_agent` for complex questions requiring cross-cutting multi-tool investigation.\n"
-            "5. Always ground your claims with concrete citations (file names, line numbers, function names).\n"
+            "4. When you need content from MULTIPLE files, prefer consolidate_files([...paths...]) over repeated read_source_file calls — it returns all content in one round-trip.\n"
+            "5. Use graphify results to decide which files to consolidate: e.g., all files in a community, all dependencies of a god node.\n"
+            "6. Only delegate to `ask_deep_analysis_agent` for complex questions requiring cross-cutting multi-tool investigation.\n"
+            "7. Always ground your claims with concrete citations (file names, line numbers, function names).\n"
         )
 
         if self._compiled_agent and self._last_model_key == model_key and self._last_system_prompt == supervisor_instructions:
             return self._compiled_agent
 
         tools = self._build_tools()
-        read_context, graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files = tools
+        read_context, graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files, consolidate_files_tool = tools
 
         llm = get_chat_model(provider, model_name, api_key)
 
         # 1. Optional Deep Analysis Subagent
         deep_analysis_agent = create_agent(
             model=llm,
-            tools=[graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files],
+            tools=[graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files, consolidate_files_tool],
             system_prompt=(
                 "You are the Deep Analysis Subagent, specialized in complex, cross-cutting investigations. "
                 "Use your tools to thoroughly trace dependencies, find bugs, or audit logic breaks. "
@@ -273,7 +299,8 @@ class CodebaseAgent:
             search_kb,
             read_file,
             list_files,
-            ask_deep_analysis_agent
+            consolidate_files_tool,
+            ask_deep_analysis_agent,
         ]
 
         supervisor_agent = create_agent(
@@ -323,7 +350,8 @@ class CodebaseAgent:
             "graphify_query": "⚡ Traversing Code Graph",
             "graphify_path": "⚡ Tracing Dependency Path",
             "graphify_explain": "⚡ Auditing Symbol Details",
-            "search_knowledge_base": "🔍 Searching knowledge base"
+            "search_knowledge_base": "🔍 Searching knowledge base",
+            "consolidate_files": "📄 Reading & merging multiple files into one document...",
         }
 
         # run_ids of in-flight `ask_deep_analysis_agent` calls. Model tokens whose ancestry

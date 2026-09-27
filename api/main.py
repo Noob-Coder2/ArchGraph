@@ -25,8 +25,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pypdf import PdfReader
-
 # Load environment variables from .env
 load_dotenv()
 
@@ -39,6 +37,7 @@ from core.llamaindex_engine import LlamaIndexEngine
 from core.agent import CodebaseAgent
 from services.storage import storage
 from services.github_service import GitHubService
+from services.consolidator import DocumentConsolidator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -151,27 +150,27 @@ async def ingest_github_repo(req: IngestGitHubRequest):
     session.vector_engine.clear()
 
     # Index files across Dual Pillars
+    # Extensions handled by markitdown for rich document → Markdown conversion
+    RICH_DOC_EXTS = {'.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls'}
+    CODE_EXTS = {'.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.cs'}
+    TEXT_EXTS = {'.md', '.txt', '.rst'}
+
     for f in files:
         try:
-            content = f.read().decode('utf-8', errors='replace')
             ext = Path(f.name).suffix.lower()
-            if ext in ['.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.cs']:
+            if ext in RICH_DOC_EXTS:
+                # Use markitdown to convert to Markdown text
+                md_content, _ = DocumentConsolidator.read_file_content(f)
+                session.vector_engine.add_file(f.name, md_content, file_type="document")
+            elif ext in CODE_EXTS:
+                content = f.read().decode('utf-8', errors='replace')
                 session.graphify.add_file(f.name, content)
                 session.vector_engine.add_file(f.name, content, file_type="code")
-            elif ext in ['.md', '.txt', '.rst']:
+            elif ext in TEXT_EXTS:
+                content = f.read().decode('utf-8', errors='replace')
                 session.vector_engine.add_file(f.name, content, file_type="document")
-            elif ext == '.pdf':
-                try:
-                    reader = PdfReader(f)
-                    pdf_content = ""
-                    for i, page in enumerate(reader.pages):
-                        text = page.extract_text() or ""
-                        pdf_content += f"--- [Page {i+1}] ---\n{text}\n\n"
-                    session.vector_engine.add_file(f.name, pdf_content.strip(), file_type="pdf")
-                except Exception as e:
-                    logger.warning(f"Could not parse PDF {f.name}, skipping: {e}")
-                    continue
             else:
+                content = f.read().decode('utf-8', errors='replace')
                 session.graphify.add_file(f.name, content)
                 session.vector_engine.add_file(f.name, content, file_type="code")
         except Exception as e:
@@ -204,15 +203,21 @@ async def ingest_files(req: IngestFilesRequest):
     session.graphify.clear()
     session.vector_engine.clear()
 
+    RICH_DOC_EXTS = {'.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls'}
+    CODE_EXTS = {'.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.cs'}
+    TEXT_EXTS = {'.md', '.txt', '.rst'}
+
     for item in req.files:
         ext = Path(item.filename).suffix.lower()
-        if ext in ['.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.cs']:
+        if ext in RICH_DOC_EXTS:
+            # item.content is already extracted Markdown text (converted on the frontend
+            # by api_client.ingest_files_backend via DocumentConsolidator.read_file_content)
+            session.vector_engine.add_file(item.filename, item.content, file_type="document")
+        elif ext in CODE_EXTS:
             session.graphify.add_file(item.filename, item.content)
             session.vector_engine.add_file(item.filename, item.content, file_type="code")
-        elif ext in ['.md', '.txt', '.rst']:
+        elif ext in TEXT_EXTS:
             session.vector_engine.add_file(item.filename, item.content, file_type="document")
-        elif ext == '.pdf':
-            session.vector_engine.add_file(item.filename, item.content, file_type="pdf")
         else:
             session.graphify.add_file(item.filename, item.content)
             session.vector_engine.add_file(item.filename, item.content, file_type="code")

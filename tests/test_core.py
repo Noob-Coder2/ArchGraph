@@ -2,57 +2,202 @@
 Unit tests for DocuStream Core: Consolidator & GitHub Services.
 """
 import io
+import types
 import pytest
+from pathlib import Path
+from unittest.mock import patch, MagicMock
 from services.consolidator import DocumentConsolidator
 from services.github_service import GitHubService
 
 
-class TestDocumentConsolidator:
-    def test_merge_to_markdown_preserves_headings(self):
-        f1 = io.BytesIO(b"# Project Title\n\n## Subheading\n\nprint('hello world')")
-        f1.name = "script.py"
+# ─────────────────────────────────────────────────────────────────────────────
+# DocumentConsolidator — read_file_content  (markitdown path)
+# ─────────────────────────────────────────────────────────────────────────────
 
-        f2 = io.BytesIO(b"# Documentation\n\nThis is a readme file.")
-        f2.name = "README.md"
+class TestReadFileContent:
+    """Tests for DocumentConsolidator.read_file_content."""
 
-        output = DocumentConsolidator.merge_to_markdown([f1, f2], include_toc=True)
+    def test_plain_text_file(self):
+        f = io.BytesIO(b"Hello, world!")
+        f.name = "readme.txt"
+        content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert content == "Hello, world!"
+        assert was_converted is False
 
-        # Ensure headings and TOC are preserved
-        assert "# Table of Contents" in output
-        assert "1. [script.py]" in output
-        assert "2. [README.md]" in output
-        assert "# Project Title" in output
-        assert "## Subheading" in output
-        assert "# Documentation" in output
-        assert "```python" in output
+    def test_python_code_file(self):
+        src = b"def add(a, b):\n    return a + b\n"
+        f = io.BytesIO(src)
+        f.name = "utils.py"
+        content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert "def add" in content
+        assert was_converted is False
 
-    def test_merge_to_text(self):
-        f1 = io.BytesIO(b"first file content")
-        f1.name = "f1.txt"
-        f2 = io.BytesIO(b"second file content")
-        f2.name = "f2.txt"
+    def test_markdown_file(self):
+        src = b"# Title\n\nSome text here."
+        f = io.BytesIO(src)
+        f.name = "README.md"
+        content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert "# Title" in content
+        assert was_converted is False
 
-        output = DocumentConsolidator.merge_to_text([f1, f2])
-        assert "FILE 1: f1.txt" in output
-        assert "first file content" in output
-        assert "FILE 2: f2.txt" in output
-        assert "second file content" in output
+    def test_pdf_uses_markitdown_when_available(self):
+        fake_result = MagicMock()
+        fake_result.text_content = "## Extracted Heading\n\nParagraph text."
+        with patch("services.consolidator._MARKITDOWN_AVAILABLE", True):
+            with patch("services.consolidator.MarkItDown") as MockMD:
+                MockMD.return_value.convert.return_value = fake_result
+                f = io.BytesIO(b"%PDF-1.4 fake pdf bytes")
+                f.name = "document.pdf"
+                content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert "Extracted Heading" in content
+        assert was_converted is True
 
-    def test_consolidate_pdf_pure_python(self):
-        f1 = io.BytesIO(b"def add(a, b):\n    return a + b\n")
-        f1.name = "math_utils.py"
+    def test_docx_uses_markitdown_when_available(self):
+        fake_result = MagicMock()
+        fake_result.text_content = "Word document content here."
+        with patch("services.consolidator._MARKITDOWN_AVAILABLE", True):
+            with patch("services.consolidator.MarkItDown") as MockMD:
+                MockMD.return_value.convert.return_value = fake_result
+                f = io.BytesIO(b"PK\x03\x04 fake docx bytes")
+                f.name = "report.docx"
+                content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert "Word document content here." in content
+        assert was_converted is True
 
-        data, mime = DocumentConsolidator.consolidate([f1], output_format="PDF")
-        assert mime == "application/pdf"
-        assert len(data) > 0
-        assert data.startswith(b"%PDF")
+    def test_rich_doc_falls_back_when_markitdown_unavailable(self):
+        with patch("services.consolidator._MARKITDOWN_AVAILABLE", False):
+            f = io.BytesIO(b"raw bytes that are valid utf-8")
+            f.name = "slides.pptx"
+            content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert "raw bytes" in content
+        assert was_converted is False
 
-    def test_unsupported_format_raises_error(self):
-        f1 = io.BytesIO(b"sample")
-        f1.name = "sample.txt"
-        with pytest.raises(ValueError, match="Unsupported output format"):
-            DocumentConsolidator.consolidate([f1], output_format="DOCX")
+    def test_markitdown_exception_falls_back_gracefully(self):
+        with patch("services.consolidator._MARKITDOWN_AVAILABLE", True):
+            with patch("services.consolidator.MarkItDown") as MockMD:
+                MockMD.return_value.convert.side_effect = RuntimeError("conversion failed")
+                f = io.BytesIO(b"fallback content bytes")
+                f.name = "broken.pdf"
+                content, was_converted = DocumentConsolidator.read_file_content(f)
+        assert isinstance(content, str)
+        assert was_converted is False
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DocumentConsolidator — consolidate_files  (agent multi-file reader)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_engine(file_contents: dict):
+    """Minimal mock of a GraphifyEngine exposing file_contents."""
+    engine = types.SimpleNamespace()
+    engine.file_contents = file_contents
+    return engine
+
+
+class TestConsolidateFiles:
+    """
+    Tests for DocumentConsolidator.consolidate_files — the agent tool that
+    merges multiple indexed files into one Markdown payload in a single call.
+    """
+
+    def test_returns_string(self):
+        engine = _make_engine({"src/utils.py": "def helper(): pass"})
+        result = DocumentConsolidator.consolidate_files(engine, ["src/utils.py"])
+        assert isinstance(result, str)
+
+    def test_contains_all_requested_files(self):
+        engine = _make_engine({
+            "src/a.py": "# file A",
+            "src/b.py": "# file B",
+        })
+        result = DocumentConsolidator.consolidate_files(
+            engine, ["src/a.py", "src/b.py"]
+        )
+        assert "a.py" in result
+        assert "b.py" in result
+        assert "# file A" in result
+        assert "# file B" in result
+
+    def test_code_fenced_with_correct_language(self):
+        engine = _make_engine({"module/core.py": "x = 1"})
+        result = DocumentConsolidator.consolidate_files(engine, ["module/core.py"])
+        assert "```python" in result
+        assert "x = 1" in result
+
+    def test_toc_included_by_default(self):
+        engine = _make_engine({
+            "a.py": "pass",
+            "b.py": "pass",
+        })
+        result = DocumentConsolidator.consolidate_files(engine, ["a.py", "b.py"])
+        assert "Table of Contents" in result
+
+    def test_toc_excluded_when_flag_false(self):
+        engine = _make_engine({"a.py": "pass"})
+        result = DocumentConsolidator.consolidate_files(
+            engine, ["a.py"], include_toc=False
+        )
+        assert "Table of Contents" not in result
+
+    def test_partial_path_match(self):
+        """A suffix / partial path like 'utils.py' resolves to 'src/utils.py'."""
+        engine = _make_engine({"src/utils.py": "def foo(): ..."})
+        result = DocumentConsolidator.consolidate_files(engine, ["utils.py"])
+        assert "foo" in result
+
+    def test_missing_path_reported_gracefully(self):
+        engine = _make_engine({})
+        result = DocumentConsolidator.consolidate_files(
+            engine, ["nonexistent/file.py"]
+        )
+        assert "nonexistent" in result or "resolve" in result.lower()
+
+    def test_empty_file_list_returns_message(self):
+        engine = _make_engine({})
+        result = DocumentConsolidator.consolidate_files(engine, [])
+        assert "No file paths" in result
+
+    def test_mixed_types_python_and_markdown(self):
+        engine = _make_engine({
+            "README.md": "# Project\nSome docs.",
+            "app.py": "import os",
+        })
+        result = DocumentConsolidator.consolidate_files(
+            engine, ["README.md", "app.py"]
+        )
+        assert "README.md" in result
+        assert "app.py" in result
+        assert "# Project" in result
+        assert "import os" in result
+
+    def test_rich_doc_content_inlined_as_markdown(self):
+        """Stored rich-doc content (already Markdown after ingestion) renders inline."""
+        engine = _make_engine({
+            "report.pdf": "## Section 1\n\nMarkdown from markitdown."
+        })
+        result = DocumentConsolidator.consolidate_files(engine, ["report.pdf"])
+        # Should appear as plain text, not wrapped in a code fence
+        assert "## Section 1" in result
+        assert "```" not in result.split("report.pdf")[1].split("---")[0]
+
+    def test_path_listed_in_toc(self):
+        engine = _make_engine({"core/engine.py": "class Engine: pass"})
+        result = DocumentConsolidator.consolidate_files(engine, ["core/engine.py"])
+        assert "engine.py" in result
+        assert "Engine" in result
+
+    def test_multiple_missing_paths_all_reported(self):
+        engine = _make_engine({})
+        result = DocumentConsolidator.consolidate_files(
+            engine, ["missing1.py", "missing2.py"]
+        )
+        assert "missing1" in result
+        assert "missing2" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHubService tests (unchanged)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TestGitHubService:
     def test_parse_github_url_repo_root(self):
@@ -89,7 +234,7 @@ class TestGitHubService:
             {'path': 'README.md', 'type': 'blob'}
         ]
         structured = GitHubService.build_tree_structure(flat_tree)
-        assert len(structured) == 2  # 'src' folder and 'README.md' file
+        assert len(structured) == 2
 
         tree_select_nodes = GitHubService.get_tree_select_nodes(structured)
         labels = [n['label'] for n in tree_select_nodes]

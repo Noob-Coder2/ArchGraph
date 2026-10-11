@@ -8,7 +8,6 @@ Features:
 """
 import os
 import streamlit as st
-from streamlit_sortables import sort_items
 
 
 def format_bytes(size: int) -> str:
@@ -78,21 +77,6 @@ def render_file_manager():
         # Rotate uploader key so widget state is cleared
         st.session_state.uploader_key += 1
         st.rerun()
-
-    # Reorder files (if not actively filtering)
-    if not search_query and len(files) > 1:
-        with st.expander("🔁 Reorder File Sequence", expanded=False):
-            st.caption("Drag items to change consolidation sequence.")
-            filenames = [f"{i}: {f.name}" for i, f in enumerate(files)]
-            sorted_items = sort_items(filenames)
-            if sorted_items != filenames:
-                # Reconstruct list safely based on original indices
-                new_list = []
-                for item in sorted_items:
-                    orig_idx = int(item.split(':')[0])
-                    new_list.append(files[orig_idx])
-                st.session_state.uploaded_files = new_list
-                st.rerun()
 
     # Queue controls
     col_clear, _ = st.columns([1, 3])

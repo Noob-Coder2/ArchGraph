@@ -5,8 +5,15 @@ Binds dedicated native tools for Graphify GraphRAG and LlamaIndex Vector Retriev
 2. graphify_path: Shortest dependency and call-chain pathfinding
 3. graphify_explain: Deep symbol, caller, and callee audit
 4. search_knowledge_base: Dense semantic retrieval over documentation, PDFs, and code chunks
-5. consolidate_knowledge_graph: Generates an LLM-ready Markdown summary of god nodes & communities
+5. consolidate_files: Merges multiple indexed files into a single Markdown payload (reduces N tool calls to 1)
 Streams reasoning events and tokens over Server-Sent Events (SSE) via LangGraph astream_events v2.
+
+Context Management (stream_reasoning):
+- Layer 1: Sliding window — keeps last 5 Human→AI turn groups verbatim.
+- Layer 2: Idempotent rolling summary — evicted turns are summarised once via LLM and
+           injected as a SystemMessage with high serial-position primacy.
+- Layer 3: Anthropic prompt caching — wraps first SystemMessage with cache_control for
+           claude-3-5-sonnet/haiku to reduce cost and TTFT on long sessions.
 """
 import asyncio
 import json
@@ -99,6 +106,8 @@ class CodebaseAgent:
         self._compiled_agent = None
         self._last_model_key = None
         self._last_system_prompt = None
+        self._conversation_summary = ""
+        self._turn_count = 0
 
     def _build_tools(self) -> list:
         """Defines and binds base tools using LangChain's @tool decorator."""
@@ -337,10 +346,99 @@ class CodebaseAgent:
                 lc_messages.append(AIMessage(content=m["content"]))
             elif m["role"] == "system":
                 lc_messages.append(SystemMessage(content=m["content"]))
+            # Note: frontend carries only user/assistant turns.
+            # ToolMessages live inside LangGraph's per-turn internal state only.
 
-        config = {
-            "recursion_limit": 15
-        }
+        # ── Layer 2: Sliding Window + Idempotent Rolling Summary ─────────────
+        # Strategy (context-window-management + conversation-memory skills):
+        #   - Keep last MAX_DIALOGUE_TURNS Human->AI turn groups verbatim.
+        #   - Summarise newly-evicted turns ONCE using _summarised_up_to to
+        #     track what was already processed (avoids re-summarising each call).
+        #   - Serial position: System -> Summary -> Recent turns -> Current query
+        #     (places critical context high-primacy, leverages recency for query).
+        MAX_DIALOGUE_TURNS = 5
+
+        system_msgs = [m for m in lc_messages if isinstance(m, SystemMessage)]
+        dialogue    = [m for m in lc_messages if not isinstance(m, SystemMessage)]
+
+        # Group by HumanMessage boundaries (turn = Human + all following AI msgs)
+        pairs: List[List[BaseMessage]] = []
+        current_pair: List[BaseMessage] = []
+        for m in dialogue:
+            if isinstance(m, HumanMessage) and current_pair:
+                pairs.append(current_pair)
+                current_pair = []
+            current_pair.append(m)
+        if current_pair:
+            pairs.append(current_pair)
+
+        if len(pairs) > MAX_DIALOGUE_TURNS:
+            evicted_pairs = pairs[:-MAX_DIALOGUE_TURNS]
+            kept_pairs    = pairs[-MAX_DIALOGUE_TURNS:]
+
+            # Only process turns that are NEWLY evicted this call
+            already_summarised: int = getattr(self, "_summarised_up_to", 0)
+            new_evictions = evicted_pairs[already_summarised:]
+
+            if new_evictions:
+                evicted_text = "\n".join(
+                    f"{m.__class__.__name__}: {_content_text(m.content)[:400]}"
+                    for pair in new_evictions
+                    for m in pair
+                    if isinstance(m, (HumanMessage, AIMessage))
+                ).strip()
+
+                if evicted_text:
+                    try:
+                        summary_prompt = (
+                            "Summarise these past conversation turns very concisely "
+                            "(max 200 words). Focus on: what was asked, which files/"
+                            "symbols were investigated, and what conclusions were reached.\n\n"
+                            + evicted_text
+                        )
+                        llm_summariser = get_chat_model(provider, model_name, api_key)
+                        resp = await llm_summariser.ainvoke(
+                            [HumanMessage(content=summary_prompt)]
+                        )
+                        new_summary = _content_text(resp.content).strip()
+                        self._conversation_summary = (
+                            (self._conversation_summary + "\n\n" + new_summary).strip()
+                            if self._conversation_summary else new_summary
+                        )
+                        # Cap at 2000 chars: drop the OLDEST content (front)
+                        if len(self._conversation_summary) > 2000:
+                            self._conversation_summary = self._conversation_summary[-2000:]
+                        self._summarised_up_to = len(evicted_pairs)
+                    except Exception:
+                        pass  # Best-effort; never block the main stream
+
+            dialogue = [m for pair in kept_pairs for m in pair]
+
+        # Inject summary with high primacy (System -> Summary -> Dialogue)
+        if self._conversation_summary:
+            system_msgs = system_msgs + [
+                SystemMessage(
+                    content=f"[EARLIER CONVERSATION SUMMARY]\n{self._conversation_summary}"
+                )
+            ]
+
+        lc_messages = system_msgs + dialogue
+
+        # ── Layer 3: Anthropic Prompt Caching ────────────────────────────────
+        # Mark first SystemMessage cacheable. Guard against double-wrapping.
+        if provider.lower() in ("anthropic", "claude"):
+            for i, msg in enumerate(lc_messages):
+                if isinstance(msg, SystemMessage):
+                    raw = msg.content
+                    if isinstance(raw, str):  # Only wrap plain strings, not already-wrapped lists
+                        lc_messages[i] = SystemMessage(content=[{
+                            "type": "text",
+                            "text": raw,
+                            "cache_control": {"type": "ephemeral"}
+                        }])
+                    break
+
+        config = {"recursion_limit": 15}
 
         tool_badges = {
             "ask_deep_analysis_agent": "🧠 Delegating to Deep Analysis Agent for cross-cutting investigation...",

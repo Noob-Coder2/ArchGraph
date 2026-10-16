@@ -1,142 +1,275 @@
 """
-DocuStream Modern UI Styling
-Glassmorphic design system, gradient accents, responsive cards, and enhanced micro-interactions.
+ArchGraph — Obsidian + Timeline Design System
+Combines the Obsidian dark theme (#121212 / #1a1a1a), emerald accents (#22c55e),
+technical monospace typography (JetBrains Mono), and responsive multi-column workspace layout.
 """
 import streamlit as st
 
 
 def apply_custom_styles():
-    """Applies clean, unified custom CSS to the Streamlit app."""
+    """Injects the Obsidian + Timeline design tokens and layout styling into Streamlit."""
     st.markdown("""
 <style>
-    /* ==================== Design System Tokens ==================== */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+    /* =========================================================================
+       1. Core Obsidian Design Tokens
+       ========================================================================= */
     :root {
-        --glass-bg-light: rgba(255, 255, 255, 0.7);
-        --glass-bg-dark: rgba(20, 24, 38, 0.75);
-        --glass-border-light: rgba(255, 255, 255, 0.25);
-        --glass-border-dark: rgba(255, 255, 255, 0.08);
-        --shadow-light: rgba(0, 0, 0, 0.08);
-        --shadow-dark: rgba(0, 0, 0, 0.35);
-        --accent-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        --accent-gradient-hover: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
-        --accent-cyan: linear-gradient(135deg, #00c6ff 0%, #0072ff 100%);
-        --success-color: #10b981;
-        --warning-color: #f59e0b;
-        --error-color: #ef4444;
+        --canvas-base: #121212;
+        --canvas-surface: #1a1a1a;
+        --canvas-subtle: #151515;
+        --canvas-input: #1e1e1e;
+        --canvas-hover: #252525;
+        
+        --border-subtle: #2a2a2a;
+        --border-hover: #3a3a3a;
+        --border-active: rgba(34, 197, 94, 0.5);
+        
+        --accent-emerald: #22c55e;
+        --accent-emerald-hover: #16a34a;
+        --accent-emerald-dim: rgba(34, 197, 94, 0.15);
+        --accent-emerald-border: rgba(34, 197, 94, 0.25);
+        --accent-amber: #eab308;
+        --accent-amber-dim: rgba(234, 179, 8, 0.15);
+        
+        --text-primary: #e5e5e5;
+        --text-secondary: #a3a3a3;
+        --text-muted: #666666;
+        --text-dim: #444444;
     }
 
-    /* ==================== Typography & Base ==================== */
+    /* =========================================================================
+       2. Root Background, Fonts & Streamlit Overrides
+       ========================================================================= */
     .stApp {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background-color: var(--canvas-base) !important;
+        color: var(--text-primary) !important;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+        -webkit-font-smoothing: antialiased;
     }
 
-    h1 {
-        background: var(--accent-gradient);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        font-weight: 800 !important;
-        letter-spacing: -0.02em;
+    [data-testid="stAppViewContainer"] {
+        background-color: var(--canvas-base) !important;
     }
 
-    h2, h3 {
-        font-weight: 600;
-        letter-spacing: -0.01em;
+    [data-testid="stHeader"] {
+        background-color: var(--canvas-surface) !important;
+        border-bottom: 1px solid var(--border-subtle) !important;
+        height: 48px !important;
     }
 
-    /* ==================== Glassmorphism Cards ==================== */
-    .metric-card, .glass-card {
-        background: rgba(102, 126, 234, 0.08);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border: 1px solid rgba(102, 126, 234, 0.18);
-        border-radius: 16px;
-        padding: 18px 22px;
-        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.08);
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    [data-testid="stToolbar"] {
+        right: 1rem !important;
+        top: 0.35rem !important;
     }
 
-    .metric-card:hover, .glass-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 12px 40px rgba(102, 126, 234, 0.15);
-        border-color: rgba(102, 126, 234, 0.35);
-    }
-
-    /* ==================== File Uploader Dropzone ==================== */
-    [data-testid="stFileUploader"] {
-        border: 2px dashed rgba(102, 126, 234, 0.4) !important;
-        border-radius: 16px !important;
-        padding: 24px !important;
-        background: rgba(102, 126, 234, 0.04) !important;
-        backdrop-filter: blur(8px) !important;
-        transition: all 0.3s ease !important;
-    }
-
-    [data-testid="stFileUploader"]:hover {
-        border-color: rgba(102, 126, 234, 0.8) !important;
-        background: rgba(102, 126, 234, 0.08) !important;
-    }
-
-    /* ==================== Buttons & Interactive Elements ==================== */
-    .stButton > button {
-        border-radius: 12px !important;
-        padding: 0.6rem 1.4rem !important;
+    /* Global typography */
+    h1, h2, h3, h4, h5, h6 {
+        color: var(--text-primary) !important;
+        font-family: 'JetBrains Mono', monospace !important;
         font-weight: 600 !important;
-        letter-spacing: 0.02em !important;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        border: none !important;
+        letter-spacing: -0.025em !important;
+    }
+
+    .mono {
+        font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* =========================================================================
+       3. Obsidian Sidebar (Explorer)
+       ========================================================================= */
+    [data-testid="stSidebar"] {
+        background-color: var(--canvas-surface) !important;
+        border-right: 1px solid var(--border-subtle) !important;
+        min-width: 280px !important;
+        max-width: 320px !important;
+    }
+
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top: 1rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+        background-color: var(--canvas-surface) !important;
+    }
+
+    /* =========================================================================
+       4. Inputs, Selectboxes, File Uploaders
+       ========================================================================= */
+    .stTextInput > div > div,
+    .stTextArea > div > div,
+    [data-baseweb="select"] > div {
+        background-color: var(--canvas-input) !important;
+        border: 1px solid var(--border-subtle) !important;
+        border-radius: 6px !important;
+        color: var(--text-primary) !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 11px !important;
+        transition: all 0.2s ease !important;
+    }
+
+    .stTextInput > div > div:focus-within,
+    .stTextArea > div > div:focus-within,
+    [data-baseweb="select"] > div:focus-within {
+        border-color: var(--accent-emerald) !important;
+        box-shadow: 0 0 0 1px var(--accent-emerald), 0 0 12px var(--accent-emerald-dim) !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] {
+        background: var(--canvas-subtle) !important;
+        border: 1px dashed var(--border-subtle) !important;
+        border-radius: 8px !important;
+        padding: 0.8rem !important;
+        transition: all 0.2s ease !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"]:hover {
+        border-color: var(--accent-emerald-border) !important;
+        background: rgba(34, 197, 94, 0.03) !important;
+    }
+
+    /* =========================================================================
+       5. Obsidian Buttons
+       ========================================================================= */
+    .stButton > button {
+        border-radius: 6px !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 11px !important;
+        font-weight: 500 !important;
+        padding: 0.4rem 0.8rem !important;
+        border: 1px solid var(--border-subtle) !important;
+        background-color: var(--canvas-input) !important;
+        color: var(--text-primary) !important;
+        transition: all 0.18s ease !important;
     }
 
     .stButton > button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.35) !important;
+        border-color: var(--border-hover) !important;
+        background-color: var(--canvas-hover) !important;
+        color: #ffffff !important;
     }
 
     .stButton > button[kind="primary"] {
-        background: var(--accent-gradient) !important;
-        color: white !important;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3) !important;
+        background-color: var(--accent-emerald) !important;
+        color: #000000 !important;
+        border: 1px solid var(--accent-emerald) !important;
+        font-weight: 600 !important;
     }
 
-    /* ==================== Tabs Styling ==================== */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background: transparent;
-        padding: 6px;
-        border-radius: 14px;
+    .stButton > button[kind="primary"]:hover {
+        background-color: var(--accent-emerald-hover) !important;
+        color: #000000 !important;
     }
 
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 10px;
-        padding: 10px 20px;
-        font-weight: 600;
-        transition: all 0.2s ease;
+    /* Download button */
+    .stDownloadButton > button {
+        border-radius: 6px !important;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 11px !important;
+        font-weight: 500 !important;
+        border: 1px solid var(--accent-emerald) !important;
+        background-color: transparent !important;
+        color: var(--accent-emerald) !important;
+        transition: all 0.18s ease !important;
     }
 
-    .stTabs [aria-selected="true"] {
-        background: var(--accent-gradient) !important;
-        color: white !important;
+    .stDownloadButton > button:hover {
+        background-color: var(--accent-emerald-dim) !important;
+        color: var(--accent-emerald) !important;
     }
 
-    /* ==================== Form Inputs Focus ==================== */
-    .stTextInput > div > div > input:focus,
-    .stTextArea > div > div > textarea:focus,
-    .stSelectbox > div > div:focus {
-        border-color: #667eea !important;
-        box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.25) !important;
-    }
-
-    /* ==================== Custom Tag & Badge Styles ==================== */
-    .badge {
+    /* =========================================================================
+       6. Telemetry Badges & Pills
+       ========================================================================= */
+    .obsidian-pill {
         display: inline-flex;
         align-items: center;
-        padding: 4px 10px;
+        gap: 5px;
+        background-color: var(--canvas-input);
+        border: 1px solid var(--border-subtle);
         border-radius: 9999px;
-        font-size: 0.75rem;
+        padding: 3px 9px;
+        font-size: 11px;
+        font-family: 'JetBrains Mono', monospace;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+
+    .obsidian-pill b {
+        color: var(--text-primary);
         font-weight: 600;
-        background: rgba(102, 126, 234, 0.15);
-        color: #667eea;
-        border: 1px solid rgba(102, 126, 234, 0.3);
+    }
+
+    .obsidian-pill.emerald {
+        background-color: var(--accent-emerald-dim);
+        border-color: var(--accent-emerald-border);
+        color: var(--accent-emerald);
+    }
+
+    .obsidian-pill.amber {
+        background-color: var(--accent-amber-dim);
+        border-color: rgba(234, 179, 8, 0.3);
+        color: var(--accent-amber);
+    }
+
+    .pulse-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+        background-color: var(--accent-emerald);
+        animation: pulseDot 2s infinite alternate;
+    }
+
+    @keyframes pulseDot {
+        from { opacity: 0.6; transform: scale(0.9); }
+        to { opacity: 1; transform: scale(1.15); box-shadow: 0 0 8px #22c55e; }
+    }
+
+    .grid-bg {
+        background-image: radial-gradient(rgba(34, 197, 94, 0.08) 1px, transparent 1px);
+        background-size: 22px 22px;
+    }
+
+    /* =========================================================================
+       7. Chat Feed & Tool Timeline Styles
+       ========================================================================= */
+    [data-testid="stChatMessage"] {
+        background-color: var(--canvas-surface) !important;
+        border: 1px solid var(--border-subtle) !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 1rem !important;
+        margin-bottom: 0.6rem !important;
+    }
+
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        background-color: var(--canvas-input) !important;
+        border-left: 3px solid var(--accent-emerald) !important;
+    }
+
+    [data-testid="stChatInput"] > div {
+        background-color: var(--canvas-input) !important;
+        border: 1px solid var(--border-subtle) !important;
+        border-radius: 8px !important;
+    }
+
+    [data-testid="stChatInput"] > div:focus-within {
+        border-color: var(--accent-emerald) !important;
+        box-shadow: 0 0 0 1px var(--accent-emerald) !important;
+    }
+
+    /* Popover / Dialog */
+    [data-testid="stPopoverBody"] {
+        background-color: var(--canvas-surface) !important;
+        border: 1px solid var(--border-subtle) !important;
+        border-radius: 12px !important;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.75) !important;
     }
 </style>
 """, unsafe_allow_html=True)

@@ -1,5 +1,5 @@
 """
-Unit tests for DocuStream Core: Consolidator & GitHub Services.
+Unit tests for ArchGraph Core: Consolidator & GitHub Services.
 """
 import io
 import types

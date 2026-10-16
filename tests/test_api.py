@@ -1,5 +1,5 @@
 """
-Unit tests for DocuStream API, Graphify Engine, and Hybrid Retrieval.
+Unit tests for ArchGraph API, Graphify Engine, and Hybrid Retrieval.
 """
 import pytest
 from fastapi.testclient import TestClient

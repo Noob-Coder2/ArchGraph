@@ -234,8 +234,14 @@ class CodebaseAgent:
                 DocumentConsolidator.consolidate_files, graph, file_paths, include_toc
             )
 
+        @tool
+        async def get_architecture_overview() -> str:
+            """Reads the architectural report and condensed graph summary to orient the agent on the codebase."""
+            return await asyncio.to_thread(graph.get_architectural_summary)
+
         return [
             read_codebase_context,
+            get_architecture_overview,
             graphify_query,
             graphify_path,
             graphify_explain,
@@ -244,6 +250,10 @@ class CodebaseAgent:
             list_repo_files,
             consolidate_files,
         ]
+
+    def build_agent_graph(self, model_name: str, api_key: str, provider: str = "nvidia", is_first_call: bool = False):
+        """Compiles the agent graph (alias for get_or_build_agent)."""
+        return self.get_or_build_agent(model_name, api_key, provider, is_first_call=is_first_call)
 
     def get_or_build_agent(self, model_name: str, api_key: str, provider: str = "nvidia", is_first_call: bool = False):
         """
@@ -259,7 +269,7 @@ class CodebaseAgent:
         ) if is_first_call else ""
 
         supervisor_instructions = (
-            "You are DocuStream Intelligent Agent, an expert software architect and codebase assistant.\n"
+            "You are ArchGraph Intelligent Agent, an expert software architect and codebase assistant.\n"
             f"{first_call_instruction}"
             "Workflow Guidelines:\n"
             "1. For most questions, use your direct tools (search_knowledge_base, graphify_query, etc.) to inspect files, structure, or content.\n"
@@ -275,14 +285,13 @@ class CodebaseAgent:
             return self._compiled_agent
 
         tools = self._build_tools()
-        read_context, graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files, consolidate_files_tool = tools
-
         llm = get_chat_model(provider, model_name, api_key)
 
         # 1. Optional Deep Analysis Subagent
+        subagent_tools = [t for t in tools if t.name not in ("read_codebase_context", "get_architecture_overview")]
         deep_analysis_agent = create_agent(
             model=llm,
-            tools=[graphify_query, graphify_path, graphify_explain, search_kb, read_file, list_files, consolidate_files_tool],
+            tools=subagent_tools,
             system_prompt=(
                 "You are the Deep Analysis Subagent, specialized in complex, cross-cutting investigations. "
                 "Use your tools to thoroughly trace dependencies, find bugs, or audit logic breaks. "
@@ -300,17 +309,7 @@ class CodebaseAgent:
             result = await deep_analysis_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
             return result["messages"][-1].content
 
-        supervisor_tools = [
-            read_context,
-            graphify_query,
-            graphify_path,
-            graphify_explain,
-            search_kb,
-            read_file,
-            list_files,
-            consolidate_files_tool,
-            ask_deep_analysis_agent,
-        ]
+        supervisor_tools = tools + [ask_deep_analysis_agent]
 
         supervisor_agent = create_agent(
             model=llm,

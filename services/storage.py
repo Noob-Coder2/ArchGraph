@@ -1,5 +1,5 @@
 """
-Embedded SQLite Storage Engine for DocuStream
+Embedded SQLite Storage Engine for ArchGraph
 Provides thread-safe session, graph artifact, and manifest persistence.
 Enables multi-worker Uvicorn concurrency and low-RAM operation with zero external database dependencies.
 """

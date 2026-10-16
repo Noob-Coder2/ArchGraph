@@ -1,5 +1,5 @@
 """
-Pydantic Schemas for DocuStream FastAPI Backend
+Pydantic Schemas for ArchGraph FastAPI Backend
 """
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field

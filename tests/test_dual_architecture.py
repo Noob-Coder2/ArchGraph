@@ -1,5 +1,5 @@
 """
-Comprehensive Test Suite for DocuStream Dual Architecture:
+Comprehensive Test Suite for ArchGraph Dual Architecture:
 - SQLite Storage Engine
 - Graphify Engine (AST, Diagnostics, Clustering, Traversal, HTML)
 - LlamaIndex Semantic Engine (FastEmbed & PDF page parsing)

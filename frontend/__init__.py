@@ -1,1 +1,1 @@
-"""Streamlit frontend package for DocuStream."""
+"""Streamlit frontend package for ArchGraph."""

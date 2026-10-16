@@ -1,5 +1,5 @@
 """
-DocuStream Pro — Root Entrypoint
+ArchGraph — Root Entrypoint
 Delegates execution to the clean frontend application module.
 """
 from frontend.app import main

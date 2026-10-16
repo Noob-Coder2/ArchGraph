@@ -1,5 +1,5 @@
 """
-DocuStream FastAPI Backend Server
+ArchGraph FastAPI Backend Server
 Dual-Pillar Architecture:
 - Pillar 1: Graphify Code Knowledge Graph (Multi-Language Tree-Sitter AST, Louvain clustering, God Nodes, HTML viz)
 - Pillar 2: LlamaIndex Local Semantic Vector Engine (FastEmbed ONNX CPU embeddings over docs & code)
@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="DocuStream Intelligence API",
+    title="ArchGraph Intelligence API",
     description="Dual-Pillar codebase intelligence engine using Graphify, LlamaIndex, and LangGraph.",
     version="2.0.0",
     debug=False,

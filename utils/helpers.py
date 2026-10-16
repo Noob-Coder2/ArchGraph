@@ -1,5 +1,5 @@
 """
-Utility functions for DocuStream WebApp
+Utility functions for ArchGraph WebApp
 - Input validation and sanitization
 - Rate limiting for API calls
 - Common helper functions

@@ -1,1 +1,1 @@
-"""Core utilities for DocuStream: Consolidator & GitHub Services."""
+"""Core utilities for ArchGraph: Consolidator & GitHub Services."""

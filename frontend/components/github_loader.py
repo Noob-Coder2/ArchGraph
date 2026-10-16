@@ -14,33 +14,42 @@ from services.github_service import GitHubService
 
 def render_github_loader():
     """Renders the unified GitHub import interface."""
-    st.caption("Import source code directly from public or private GitHub repositories, files, or Gists.")
+    st.markdown("""
+    <div style="margin-bottom: 8px;">
+        <span style="font-size: 0.95rem; font-weight: 600; color: #F0F4F8;">GitHub Remote Ingest</span>
+        <div style="font-size: 0.78rem; color: #64748B; margin-top: 2px;">
+            Load public/private repositories, single files, or Gists.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # URL Input
     github_input = st.text_input(
         "GitHub URL",
-        placeholder="https://github.com/owner/repo or file / gist URL",
+        placeholder="https://github.com/owner/repo or Gist URL",
         key="unified_github_url",
-        help="Paste a repository URL, single file blob URL, or Gist URL."
+        help="Paste a repository URL, single file blob URL, or Gist URL.",
+        label_visibility="collapsed"
     )
 
     # Advanced Token Expander (PAT for private repos & rate limit avoidance)
-    with st.expander("🔑 Advanced: GitHub Access Token (optional)"):
+    with st.expander("🔑 Personal Access Token (PAT)", expanded=False):
         token = st.text_input(
-            "Personal Access Token (PAT)",
+            "PAT Token",
             value=st.session_state.get('github_token', ''),
             type="password",
-            help="Required for private repositories or to avoid GitHub's 60 requests/hour unauthenticated limit.",
-            key="github_pat_input"
+            placeholder="ghp_...",
+            help="Required for private repositories or to prevent rate limiting (60 req/hr unauthenticated).",
+            key="github_pat_input",
+            label_visibility="collapsed"
         )
         if token:
             st.session_state.github_token = token.strip()
+        st.caption("Token is stored in active session memory only.")
 
     active_token = st.session_state.get('github_token') or None
 
-    col_action1, col_action2 = st.columns([1, 1])
-    with col_action1:
-        load_btn = st.button("🔍 Load / Inspect", type="primary", use_container_width=True)
+    load_btn = st.button("🔍 Fetch Repository / URL", type="secondary", use_container_width=True)
 
     if load_btn and github_input:
         url = github_input.strip()
@@ -65,7 +74,7 @@ def render_github_loader():
         # 2. Repo or Blob/Tree Check
         parsed = GitHubService.parse_github_url(url)
         if not parsed:
-            st.error("Invalid GitHub URL. Format: https://github.com/owner/repo")
+            st.error("Invalid GitHub URL. Expected format: https://github.com/owner/repo")
             return
 
         owner, repo, branch, path = parsed['owner'], parsed['repo'], parsed['branch'], parsed['path']
@@ -104,7 +113,13 @@ def render_github_loader():
     # Render Interactive Tree Select if repository tree is in session state
     if st.session_state.get('repo_tree_nodes') and st.session_state.get('repo_info'):
         info = st.session_state.repo_info
-        st.markdown(f"### 🌳 Repository: `{info['owner']}/{info['repo']}` (`{info['branch']}`)")
+        st.markdown(f"""
+        <div style="background: rgba(13, 17, 24, 0.65); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px; margin: 10px 0;">
+            <div style="font-size: 0.75rem; font-family: ui-monospace, monospace; color: #64748B;">REPOSITORY</div>
+            <div style="font-size: 0.85rem; font-weight: 600; color: #F0F4F8;">{info['owner']}/{info['repo']}</div>
+            <div style="font-size: 0.72rem; color: #38BDF8;">branch: {info['branch']}</div>
+        </div>
+        """, unsafe_allow_html=True)
         
         selected_nodes = tree_select(
             st.session_state.repo_tree_nodes,
@@ -115,7 +130,7 @@ def render_github_loader():
 
         col_import, col_clear = st.columns([2, 1])
         with col_import:
-            if st.button(f"📥 Import {len(checked_paths)} Selected File(s)", type="primary", disabled=not checked_paths):
+            if st.button(f"📥 Import {len(checked_paths)} File(s)", type="primary", disabled=not checked_paths, use_container_width=True):
                 # Filter out folder paths (only fetch files)
                 file_paths = [p for p in checked_paths if '.' in p.split('/')[-1]]
                 with st.spinner(f"Downloading {len(file_paths)} files..."):
@@ -138,7 +153,7 @@ def render_github_loader():
                         st.warning(f"Encountered {len(errors)} issues during download.")
 
         with col_clear:
-            if st.button("Close Explorer", type="secondary"):
+            if st.button("Close", type="secondary", use_container_width=True):
                 st.session_state.repo_tree_nodes = None
                 st.session_state.repo_info = None
                 st.rerun()

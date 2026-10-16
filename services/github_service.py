@@ -1,5 +1,5 @@
 """
-GitHub API Service for DocuStream
+GitHub API Service for ArchGraph
 Handles fetching repository trees, raw files, and Gists with optional PAT authentication.
 Decoupled from Streamlit for reuse across API and Frontend layers.
 """
@@ -49,7 +49,7 @@ class GitHubService:
     @classmethod
     def get_headers(cls, token: Optional[str] = None) -> Dict[str, str]:
         """Generate GitHub headers with optional Bearer token."""
-        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "DocuStream-Pro"}
+        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "ArchGraph-Pro"}
         if token and token.strip():
             headers["Authorization"] = f"Bearer {token.strip()}"
         return headers

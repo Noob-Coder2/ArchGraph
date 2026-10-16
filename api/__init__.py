@@ -1,1 +1,1 @@
-"""FastAPI backend package for DocuStream Intelligence Platform."""
+"""FastAPI backend package for ArchGraph Intelligence Platform."""

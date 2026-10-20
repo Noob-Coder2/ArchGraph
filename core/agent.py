@@ -1,33 +1,44 @@
 """
-LangGraph Multi-Tool Agent Orchestrator
-Binds dedicated native tools for Graphify GraphRAG and LlamaIndex Vector Retrieval:
-1. graphify_query: BFS/DFS topological exploration across code communities
-2. graphify_path: Shortest dependency and call-chain pathfinding
-3. graphify_explain: Deep symbol, caller, and callee audit
-4. search_knowledge_base: Dense semantic retrieval over documentation, PDFs, and code chunks
-5. consolidate_files: Merges multiple indexed files into a single Markdown payload (reduces N tool calls to 1)
-Streams reasoning events and tokens over Server-Sent Events (SSE) via LangGraph astream_events v2.
+LangGraph Multi-Tool Agent Orchestrator (High-Bandwidth & Inline Reasoning Edition)
 
-Context Management (stream_reasoning):
-- Layer 1: Sliding window — keeps last 5 Human→AI turn groups verbatim.
-- Layer 2: Idempotent rolling summary — evicted turns are summarised once via LLM and
-           injected as a SystemMessage with high serial-position primacy.
-- Layer 3: Anthropic prompt caching — wraps first SystemMessage with cache_control for
-           claude-3-5-sonnet/haiku to reduce cost and TTFT on long sessions.
+Key Architectural Upgrades:
+1. Locate -> Hydrate -> Audit Workflow:
+   - Uses `core/tools.py` with AST-aware surgical slicing (`filepath::SymbolName`),
+     decorator preservation, and automatic import preambles.
+2. Separate `reasoning` vs `token` vs `tool_start`/`tool_end` SSE Channels:
+   - Captures native model reasoning (`reasoning_content` from DeepSeek-R1 / Nemotron / Claude)
+     AND pre-tool transitional thoughts ("Let me check...") into `{"event": "thinking"}` frames
+     so they render cleanly inside the UI's collapsible inline thought accordion instead of
+     polluting the final Markdown answer!
+3. Guaranteed Synthesis Guard + Two-Tier Working Set Memory:
+   - Retains a bounded Working Set of recently inspected code across turns and guarantees a
+     complete technical synthesis even if a model stops early after tool execution.
 """
 import asyncio
 import json
-import os
-from pathlib import Path
-from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Optional, AsyncGenerator
+import time
+from typing import List, Dict, Any, AsyncGenerator
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain.agents import create_agent
-from services.consolidator import DocumentConsolidator
+from langgraph.errors import GraphRecursionError
+
+from core.tools import create_codebase_tools, build_repo_map, clip
+
+
+def _sse_event(payload: Dict[str, Any]) -> str:
+    """Serializes a typed SSE JSON frame (token, thinking, tool_start, tool_end, or error)."""
+    return f"data: {json.dumps(payload)}\n\n"
+
 
 def _sse_token(text: str) -> str:
-    """One SSE frame carrying answer/activity text (real newlines survive JSON encoding)."""
-    return f"data: {json.dumps({'token': text})}\n\n"
+    """One SSE frame carrying final assistant answer text."""
+    return _sse_event({"token": text})
+
+
+def _sse_thinking(text: str) -> str:
+    """One SSE frame carrying model reasoning / intermediate thought text."""
+    return _sse_event({"event": "thinking", "text": text})
 
 
 def _content_text(content: Any) -> str:
@@ -43,11 +54,29 @@ def _content_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _extract_reasoning_text(chunk: Any) -> str:
+    """Extracts native reasoning/thinking tokens from DeepSeek, Nemotron, OpenAI o-series, or Anthropic chunks."""
+    if chunk is None:
+        return ""
+    add_kw = getattr(chunk, "additional_kwargs", None) or {}
+    if isinstance(add_kw, dict):
+        for key in ("reasoning_content", "reasoning", "thought"):
+            val = add_kw.get(key)
+            if isinstance(val, str) and val:
+                return val
+    content = getattr(chunk, "content", None)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("thinking", "reasoning"):
+                parts.append(block.get("thinking") or block.get("text") or "")
+        return "".join(parts)
+    return ""
+
 
 def get_chat_model(provider: str, model_name: str, api_key: str):
     """Instantiates the official provider ChatModel class."""
     prov = provider.lower()
-
     if "nvidia" in prov:
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
         return ChatNVIDIA(
@@ -77,15 +106,6 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
             max_tokens=8192,
             timeout=120
         )
-    elif "openai" in prov:
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model_name,
-            api_key=api_key.strip(),
-            temperature=0.1,
-            max_tokens=8192,
-            timeout=120
-        )
     else:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
@@ -107,149 +127,15 @@ class CodebaseAgent:
         self._last_model_key = None
         self._last_system_prompt = None
         self._conversation_summary = ""
-        self._turn_count = 0
+        self._summarised_up_to = 0
+        self._summary_lock = asyncio.Lock()
+        self._last_turn_evidence = ""
 
-    def _build_tools(self) -> list:
-        """Defines and binds base tools using LangChain's @tool decorator."""
-        graph = self.graph_engine
-        vector = self.vector_engine
-
-        @tool
-        async def read_codebase_context() -> str:
-            """Reads the architectural report and condensed graph summary to orient the agent on the codebase."""
-            return await asyncio.to_thread(graph.get_architectural_summary)
-
-        @tool
-        async def graphify_query(question: str, mode: str = "bfs") -> str:
-            """Searches the codebase structural knowledge graph using BFS (broad architectural context)
-            or DFS (deep execution paths) across functional communities and call flows."""
-            return await asyncio.to_thread(graph.query_traversal, question, mode=mode)
-
-        @tool
-        async def graphify_path(source_symbol: str, target_symbol: str) -> str:
-            """Finds the shortest dependency or call-chain path between two symbols, classes, or modules
-            in the codebase knowledge graph."""
-            return await asyncio.to_thread(graph.find_path, source_symbol, target_symbol)
-
-        @tool
-        async def graphify_explain(symbol: str) -> str:
-            """Performs a structural audit of a specific class, function, or central God Node,
-            revealing its degree centrality, callers, callees, and community module."""
-            return await asyncio.to_thread(graph.explain_symbol, symbol)
-
-        @tool
-        async def search_knowledge_base(query: str, doc_type: Optional[str] = None) -> str:
-            """Performs dense semantic vector search across documentation (Markdown, text, extracted PDF pages)
-            and code comments to find conceptual explanations, requirements, and logic passages."""
-            results = await asyncio.to_thread(vector.retrieve, query, top_k=6, file_type=doc_type)
-            if not results:
-                return "No matching documentation or code passages found for this query."
-            formatted = []
-            for i, r in enumerate(results, 1):
-                page_info = f" (Page {r['page_number']})" if r.get('file_type') == 'pdf' else ""
-                formatted.append(f"#### [{i}] `{r['filepath']}`{page_info} (Score: {r['score']:.2f}):\n```\n{r['content']}\n```")
-            return "\n\n".join(formatted)
-
-        @tool
-        async def read_source_file(filepath: str, start_line: Optional[int] = 1, line_count: Optional[int] = 100) -> str:
-            """Reads specific lines from an indexed source file or document in the codebase.
-
-            Args:
-                filepath: Relative or absolute path to the file.
-                start_line: 1-indexed starting line number (default: 1).
-                line_count: Number of lines to read (default: 100).
-            """
-            clean_path = filepath.replace('\\', '/').strip()
-            content = None
-            if hasattr(graph, 'file_contents') and graph.file_contents:
-                if clean_path in graph.file_contents:
-                    content = graph.file_contents[clean_path]
-                else:
-                    for k, v in graph.file_contents.items():
-                        if k.endswith(clean_path) or clean_path.endswith(k):
-                            content = v
-                            clean_path = k
-                            break
-
-            if content is None:
-                p = Path(clean_path)
-                if not p.is_absolute():
-                    p = Path.cwd() / clean_path
-                if p.exists() and p.is_file():
-                    try:
-                        content = p.read_text(encoding='utf-8', errors='ignore')
-                    except Exception as e:
-                        return f"Error reading file '{filepath}': {str(e)}"
-
-            if content is None:
-                return f"File '{filepath}' was not found in the indexed repository."
-
-            lines = content.splitlines()
-            total_lines = len(lines)
-            s_line = max(1, start_line or 1)
-            e_line = min(total_lines, s_line + (line_count or 100) - 1)
-
-            selected_lines = lines[s_line - 1 : e_line]
-            numbered = [f"{s_line + i}: {line}" for i, line in enumerate(selected_lines)]
-            header = f"### File: `{clean_path}` (Lines {s_line}-{e_line} of {total_lines})\n```\n"
-            return header + "\n".join(numbered) + "\n```"
-
-        @tool
-        async def list_repo_files() -> str:
-            """Lists all files registered and indexed in the repository knowledge base."""
-            files = []
-            if hasattr(graph, 'file_contents') and graph.file_contents:
-                files = sorted(list(graph.file_contents.keys()))
-            elif hasattr(vector, 'documents') and vector.documents:
-                files = sorted(list(set(doc.metadata.get('filepath', '') for doc in vector.documents if doc.metadata.get('filepath'))))
-            if not files:
-                for root, _, filenames in os.walk(Path.cwd()):
-                    if any(ignored in root for ignored in ['.git', '.venv', '__pycache__', 'node_modules', '.idea', 'data']):
-                        continue
-                    for fn in filenames:
-                        rel = os.path.relpath(os.path.join(root, fn), Path.cwd()).replace('\\', '/')
-                        files.append(rel)
-            if not files:
-                return "No files currently indexed in the repository."
-            return "### Indexed Repository Files:\n" + "\n".join(f"- `{f}`" for f in sorted(files)[:100])
-
-        @tool
-        async def consolidate_files(file_paths: List[str], include_toc: bool = True) -> str:
-            """Reads and merges multiple indexed files into a single Markdown document.
-
-            Use this INSTEAD of calling read_source_file multiple times when you need
-            the content of several files — you get all content back in one tool call,
-            which significantly reduces latency.
-
-            Workflow tip: Use graphify_query, graphify_path, or graphify_explain to
-            discover which files are structurally related (same community, call chain,
-            or god-node dependencies), then pass those file paths here to consolidate
-            them efficiently.
-
-            Args:
-                file_paths:  List of file paths to read and merge (relative or absolute).
-                include_toc: Whether to include a Table of Contents header (default True).
-            """
-            return await asyncio.to_thread(
-                DocumentConsolidator.consolidate_files, graph, file_paths, include_toc
-            )
-
-        @tool
-        async def get_architecture_overview() -> str:
-            """Reads the architectural report and condensed graph summary to orient the agent on the codebase."""
-            return await asyncio.to_thread(graph.get_architectural_summary)
-
-        return [
-            read_codebase_context,
-            get_architecture_overview,
-            graphify_query,
-            graphify_path,
-            graphify_explain,
-            search_knowledge_base,
-            read_source_file,
-            list_repo_files,
-            consolidate_files,
-        ]
+    def invalidate_cache(self):
+        """Clears compiled agent cache when repository index is updated."""
+        self._compiled_agent = None
+        self._last_system_prompt = None
+        self._last_turn_evidence = ""
 
     def build_agent_graph(self, model_name: str, api_key: str, provider: str = "nvidia", is_first_call: bool = False):
         """Compiles the agent graph (alias for get_or_build_agent)."""
@@ -257,60 +143,59 @@ class CodebaseAgent:
 
     def get_or_build_agent(self, model_name: str, api_key: str, provider: str = "nvidia", is_first_call: bool = False):
         """
-        Compiles the agent graph or returns the cached version.
-        Uses a flattened tool structure with a single supervisor and one optional deep analysis subagent.
+        Compiles the agent graph with the Locate -> Hydrate -> Audit workflow and
+        surgical AST slicing rules.
         """
         model_key = f"{provider}:{model_name}"
-        
-        # Use conditional prompt instruction for first call
-        first_call_instruction = (
-            "IMPORTANT: As this is your first interaction, you MUST call `read_codebase_context` before answering ANY question. "
-            "This loads the architectural report and graph summary you need to reason about the codebase.\n\n"
-        ) if is_first_call else ""
+        repo_map = build_repo_map(self.graph_engine, self.vector_engine)
 
         supervisor_instructions = (
-            "You are ArchGraph Intelligent Agent, an expert software architect and codebase assistant.\n"
-            f"{first_call_instruction}"
-            "Workflow Guidelines:\n"
-            "1. For most questions, use your direct tools (search_knowledge_base, graphify_query, etc.) to inspect files, structure, or content.\n"
-            "2. Semantic search (search_knowledge_base) is a great starting point to find relevant file/symbol names.\n"
-            "3. Use graph traversal (graphify_query, graphify_path, graphify_explain) to understand relationships and structure.\n"
-            "4. When you need content from MULTIPLE files, prefer consolidate_files([...paths...]) over repeated read_source_file calls — it returns all content in one round-trip.\n"
-            "5. Use graphify results to decide which files to consolidate: e.g., all files in a community, all dependencies of a god node.\n"
-            "6. Only delegate to `ask_deep_analysis_agent` for complex questions requiring cross-cutting multi-tool investigation.\n"
-            "7. Always ground your claims with concrete citations (file names, line numbers, function names).\n"
+            "You are ArchGraph Intelligent Agent, a Principal Software Architect and deterministic codebase auditor.\n"
+            "Your role is to provide deep, zero-hallucination 'second-opinion' architectural reviews, bug root-cause "
+            "analyses, and onboarding guidance.\n\n"
+            f"## Repository Map & Architectural Overview\n{repo_map}\n\n"
+            "## High-Bandwidth 'Locate -> Hydrate -> Audit' Protocol\n"
+            "1. STEP 1 (LOCATE): Start with `search_code(query)` when you do not know exact file or symbol names. "
+            "It runs Graphify AST traversal and semantic search concurrently.\n"
+            "2. STEP 2 (SURGICAL HYDRATION): Instead of calling `read_file` in tiny loops, use `consolidate_files([...])` "
+            "to batch-load all 2 to 6 relevant files or symbols in ONE round-trip:\n"
+            "   - Pass `'path/to/file.py'` for small/medium files (<=380 lines are read 100% in full) or schema files (`schemas.py`, `models.py`).\n"
+            "   - For huge files (>380 lines) where you only need specific functions/classes, pass `'path/to/file.py::SymbolName'` "
+            "     or `'path/to/file.py:start-end'`. The tool automatically includes `@decorators` and top-of-file imports!\n"
+            "   - Or call `explain_symbol('SymbolName')` to get a symbol's callers, callees, AND its exact AST source slice.\n"
+            "3. STEP 3 (AUDIT & SYNTHESIZE): Complete your tool calls in 2 to 4 steps, then write a comprehensive, "
+            "citation-backed engineering answer citing exact file paths, symbol names, and line numbers.\n"
+            "4. Do NOT output filler narration like 'Let me read...' before calling tools—invoke tools directly."
         )
 
-        if self._compiled_agent and self._last_model_key == model_key and self._last_system_prompt == supervisor_instructions:
+        if (
+            self._compiled_agent
+            and self._last_model_key == model_key
+            and self._last_system_prompt == supervisor_instructions
+        ):
             return self._compiled_agent
 
-        tools = self._build_tools()
+        base_tools = create_codebase_tools(self.graph_engine, self.vector_engine)
         llm = get_chat_model(provider, model_name, api_key)
 
-        # 1. Optional Deep Analysis Subagent
-        subagent_tools = [t for t in tools if t.name not in ("read_codebase_context", "get_architecture_overview")]
         deep_analysis_agent = create_agent(
             model=llm,
-            tools=subagent_tools,
+            tools=base_tools,
             system_prompt=(
-                "You are the Deep Analysis Subagent, specialized in complex, cross-cutting investigations. "
-                "Use your tools to thoroughly trace dependencies, find bugs, or audit logic breaks. "
-                "Return a comprehensive, detailed analysis with file and symbol citations."
+                "You are the Deep Analysis Subagent, specialized in multi-hop architectural investigations.\n"
+                f"## Repository Overview\n{repo_map}\n\n"
+                "Use `search_code`, `consolidate_files` (with `file.py::Symbol` for large files), and `explain_symbol` "
+                "to trace call chains, verify schemas, and return a citation-backed technical synthesis."
             )
         )
 
         @tool
         async def ask_deep_analysis_agent(query: str) -> str:
-            """Consults the Deep Analysis Subagent for complex, multi-step investigations requiring cross-cutting analysis of architecture, logic breaks, or bugs.
-
-            Args:
-                query: The specific complex investigation to perform.
-            """
+            """Consults the Deep Analysis Subagent for complex, cross-cutting architectural audits or bug traces."""
             result = await deep_analysis_agent.ainvoke({"messages": [{"role": "user", "content": query}]})
-            return result["messages"][-1].content
+            return _content_text(result["messages"][-1].content)
 
-        supervisor_tools = tools + [ask_deep_analysis_agent]
-
+        supervisor_tools = base_tools + [ask_deep_analysis_agent]
         supervisor_agent = create_agent(
             model=llm,
             tools=supervisor_tools,
@@ -322,6 +207,46 @@ class CodebaseAgent:
         self._last_system_prompt = supervisor_instructions
         return supervisor_agent
 
+    async def _update_summary_background(
+        self,
+        evicted_pairs: List[List[BaseMessage]],
+        provider: str,
+        model_name: str,
+        api_key: str
+    ):
+        """Summarizes newly evicted turns asynchronously in the background without blocking TTFT."""
+        if self._summary_lock.locked():
+            return
+        async with self._summary_lock:
+            new_evictions = evicted_pairs[self._summarised_up_to:]
+            if not new_evictions:
+                return
+            evicted_text = "\n".join(
+                f"{m.__class__.__name__}: {_content_text(m.content)[:400]}"
+                for pair in new_evictions
+                for m in pair
+                if isinstance(m, (HumanMessage, AIMessage))
+            ).strip()
+            if not evicted_text:
+                return
+            try:
+                summary_prompt = (
+                    "Summarise these past conversation turns very concisely (max 180 words). "
+                    "Focus on: what was asked, which files/symbols were inspected, and key findings.\n\n"
+                    + evicted_text
+                )
+                llm_summariser = get_chat_model(provider, model_name, api_key)
+                resp = await llm_summariser.ainvoke([HumanMessage(content=summary_prompt)])
+                new_summary = _content_text(resp.content).strip()
+                if new_summary:
+                    self._conversation_summary = (
+                        f"{self._conversation_summary}\n\n{new_summary}".strip()
+                        if self._conversation_summary else new_summary
+                    )[-2000:]
+                    self._summarised_up_to = len(evicted_pairs)
+            except Exception:
+                pass
+
     async def stream_reasoning(
         self,
         messages: List[Dict[str, str]],
@@ -332,35 +257,34 @@ class CodebaseAgent:
         is_first_call: bool = False
     ) -> AsyncGenerator[str, None]:
         """
-        Streams reasoning and tool execution events over Server-Sent Events (SSE).
-        Uses LangGraph v2 astream_events for token and tool event streaming.
+        Streams structured `thinking`, `tool_start`, `tool_end`, and final `token` SSE frames.
+        Buffers each LLM generation step just enough to know whether the step is an intermediate
+        pre-tool thought ("Let me check...") vs. the final answer, routing pre-tool chatter
+        into the collapsible inline thought accordion instead of polluting the main chat!
         """
         app_graph = self.get_or_build_agent(model_name, api_key, provider, is_first_call=is_first_call)
 
-        lc_messages = []
+        lc_messages: List[BaseMessage] = []
         for m in messages:
+            content_str = (m.get("content") or "").strip()
+            if not content_str:
+                continue
             if m["role"] == "user":
-                lc_messages.append(HumanMessage(content=m["content"]))
+                lc_messages.append(HumanMessage(content=content_str))
             elif m["role"] == "assistant":
-                lc_messages.append(AIMessage(content=m["content"]))
+                cleaned = "\n".join(
+                    line for line in content_str.splitlines()
+                    if not line.strip().startswith("⚠️ LangGraph Agent Error")
+                ).strip()
+                if cleaned:
+                    lc_messages.append(AIMessage(content=cleaned))
             elif m["role"] == "system":
-                lc_messages.append(SystemMessage(content=m["content"]))
-            # Note: frontend carries only user/assistant turns.
-            # ToolMessages live inside LangGraph's per-turn internal state only.
+                lc_messages.append(SystemMessage(content=content_str))
 
-        # ── Layer 2: Sliding Window + Idempotent Rolling Summary ─────────────
-        # Strategy (context-window-management + conversation-memory skills):
-        #   - Keep last MAX_DIALOGUE_TURNS Human->AI turn groups verbatim.
-        #   - Summarise newly-evicted turns ONCE using _summarised_up_to to
-        #     track what was already processed (avoids re-summarising each call).
-        #   - Serial position: System -> Summary -> Recent turns -> Current query
-        #     (places critical context high-primacy, leverages recency for query).
         MAX_DIALOGUE_TURNS = 5
-
         system_msgs = [m for m in lc_messages if isinstance(m, SystemMessage)]
-        dialogue    = [m for m in lc_messages if not isinstance(m, SystemMessage)]
+        dialogue = [m for m in lc_messages if not isinstance(m, SystemMessage)]
 
-        # Group by HumanMessage boundaries (turn = Human + all following AI msgs)
         pairs: List[List[BaseMessage]] = []
         current_pair: List[BaseMessage] = []
         for m in dialogue:
@@ -371,90 +295,58 @@ class CodebaseAgent:
         if current_pair:
             pairs.append(current_pair)
 
+        evicted_pairs_to_summarise: List[List[BaseMessage]] = []
         if len(pairs) > MAX_DIALOGUE_TURNS:
-            evicted_pairs = pairs[:-MAX_DIALOGUE_TURNS]
-            kept_pairs    = pairs[-MAX_DIALOGUE_TURNS:]
-
-            # Only process turns that are NEWLY evicted this call
-            already_summarised: int = getattr(self, "_summarised_up_to", 0)
-            new_evictions = evicted_pairs[already_summarised:]
-
-            if new_evictions:
-                evicted_text = "\n".join(
-                    f"{m.__class__.__name__}: {_content_text(m.content)[:400]}"
-                    for pair in new_evictions
-                    for m in pair
-                    if isinstance(m, (HumanMessage, AIMessage))
-                ).strip()
-
-                if evicted_text:
-                    try:
-                        summary_prompt = (
-                            "Summarise these past conversation turns very concisely "
-                            "(max 200 words). Focus on: what was asked, which files/"
-                            "symbols were investigated, and what conclusions were reached.\n\n"
-                            + evicted_text
-                        )
-                        llm_summariser = get_chat_model(provider, model_name, api_key)
-                        resp = await llm_summariser.ainvoke(
-                            [HumanMessage(content=summary_prompt)]
-                        )
-                        new_summary = _content_text(resp.content).strip()
-                        self._conversation_summary = (
-                            (self._conversation_summary + "\n\n" + new_summary).strip()
-                            if self._conversation_summary else new_summary
-                        )
-                        # Cap at 2000 chars: drop the OLDEST content (front)
-                        if len(self._conversation_summary) > 2000:
-                            self._conversation_summary = self._conversation_summary[-2000:]
-                        self._summarised_up_to = len(evicted_pairs)
-                    except Exception:
-                        pass  # Best-effort; never block the main stream
-
+            evicted_pairs_to_summarise = pairs[:-MAX_DIALOGUE_TURNS]
+            kept_pairs = pairs[-MAX_DIALOGUE_TURNS:]
             dialogue = [m for pair in kept_pairs for m in pair]
 
-        # Inject summary with high primacy (System -> Summary -> Dialogue)
         if self._conversation_summary:
             system_msgs = system_msgs + [
+                SystemMessage(content=f"[EARLIER CONVERSATION SUMMARY]\n{self._conversation_summary}")
+            ]
+
+        if self._last_turn_evidence:
+            system_msgs = system_msgs + [
                 SystemMessage(
-                    content=f"[EARLIER CONVERSATION SUMMARY]\n{self._conversation_summary}"
+                    content=(
+                        "[WORKING SET CACHE — RECENTLY INSPECTED CODE FROM PREVIOUS TURN]\n"
+                        "Reuse this already-retrieved code context if relevant before making redundant tool calls:\n"
+                        f"{self._last_turn_evidence}"
+                    )
                 )
             ]
 
         lc_messages = system_msgs + dialogue
 
-        # ── Layer 3: Anthropic Prompt Caching ────────────────────────────────
-        # Mark first SystemMessage cacheable. Guard against double-wrapping.
         if provider.lower() in ("anthropic", "claude"):
             for i, msg in enumerate(lc_messages):
-                if isinstance(msg, SystemMessage):
-                    raw = msg.content
-                    if isinstance(raw, str):  # Only wrap plain strings, not already-wrapped lists
-                        lc_messages[i] = SystemMessage(content=[{
-                            "type": "text",
-                            "text": raw,
-                            "cache_control": {"type": "ephemeral"}
-                        }])
+                if isinstance(msg, SystemMessage) and isinstance(msg.content, str):
+                    lc_messages[i] = SystemMessage(content=[{
+                        "type": "text",
+                        "text": msg.content,
+                        "cache_control": {"type": "ephemeral"}
+                    }])
                     break
 
-        config = {"recursion_limit": 15}
-
-        tool_badges = {
-            "ask_deep_analysis_agent": "🧠 Delegating to Deep Analysis Agent for cross-cutting investigation...",
-            "read_codebase_context": "📄 Loading codebase architecture context...",
-            "read_source_file": "📖 Reading source code lines",
-            "list_repo_files": "📁 Listing repository files...",
-            "graphify_query": "⚡ Traversing Code Graph",
-            "graphify_path": "⚡ Tracing Dependency Path",
-            "graphify_explain": "⚡ Auditing Symbol Details",
-            "search_knowledge_base": "🔍 Searching knowledge base",
-            "consolidate_files": "📄 Reading & merging multiple files into one document...",
+        config = {"recursion_limit": 35}
+        tool_descriptions = {
+            "search_code": "Hybrid AST graph + BGE vector search",
+            "explain_symbol": "Auditing symbol callers, callees & AST slice",
+            "trace_path": "Computing shortest dependency call path",
+            "read_file": "Smart AST file / symbol reader",
+            "list_files": "Exploring repository directory structure",
+            "consolidate_files": "Hydrating surgical multi-file audit bundle",
+            "ask_deep_analysis_agent": "Subagent cross-cutting architectural audit",
         }
 
-        # run_ids of in-flight `ask_deep_analysis_agent` calls. Model tokens whose ancestry
-        # (parent_ids) contains one of these come from the subagent's internal loop and must
-        # not reach the user: the supervisor writes the final answer itself.
         delegate_runs = set()
+        tool_start_times: Dict[str, float] = {}
+        gathered_tool_outputs: List[str] = []
+        step_token_buffer: List[str] = []
+        emitted_answer_chars = 0
+        had_any_tool_call = False
+        recursion_hit = False
 
         try:
             async for event in app_graph.astream_events(
@@ -464,46 +356,163 @@ class CodebaseAgent:
             ):
                 event_type = event["event"]
 
-                # 1. Stream tool execution indicators
+                # 1. Tool Start -> Flush any buffered pre-tool text ("Let me check...") as `thinking`!
                 if event_type == "on_tool_start":
+                    had_any_tool_call = True
+                    if step_token_buffer:
+                        pre_tool_thought = "".join(step_token_buffer).strip()
+                        step_token_buffer.clear()
+                        if pre_tool_thought:
+                            yield _sse_thinking(pre_tool_thought + "\n")
+
+                    run_id = event.get("run_id", "")
                     tool_name = event.get("name", "tool")
+                    tool_start_times[run_id] = time.perf_counter()
+
                     if tool_name == "ask_deep_analysis_agent":
-                        delegate_runs.add(event.get("run_id"))
+                        delegate_runs.add(run_id)
+
                     tool_input = event.get("data", {}).get("input", {})
                     if not isinstance(tool_input, dict):
                         tool_input = {}
-                    query_arg = tool_input.get("query") or tool_input.get("question") or tool_input.get("symbol", "")
-                    badge = tool_badges.get(tool_name, f"Calling tool: `{tool_name}`...")
+                    arg_preview = (
+                        tool_input.get("query")
+                        or tool_input.get("symbol")
+                        or tool_input.get("filepath")
+                        or tool_input.get("file_paths")
+                        or tool_input.get("source_symbol")
+                        or tool_input.get("path_prefix")
+                        or ""
+                    )
+                    if isinstance(arg_preview, list):
+                        arg_preview = ", ".join(str(x) for x in arg_preview[:4])
+                    default_desc = tool_descriptions.get(tool_name, f"Executing {tool_name}")
+                    desc = f"{default_desc}: {arg_preview}" if arg_preview else default_desc
 
-                    if tool_name in ["read_codebase_context", "list_repo_files", "ask_deep_analysis_agent"]:
-                        yield _sse_token(f"\n\n*{badge}*\n\n")
-                    else:
-                        detail = f": '{query_arg}'" if query_arg else ""
-                        yield _sse_token(f"\n\n*{badge}{detail}*\n\n")
+                    yield _sse_event({
+                        "event": "tool_start",
+                        "run_id": run_id,
+                        "tool": tool_name,
+                        "desc": str(desc)[:110],
+                        "latency": "running..."
+                    })
 
-                # 2. Stream generated LLM tokens (supervisor only)
+                # 2. Stream Model Tokens & Native Reasoning
                 elif event_type == "on_chat_model_stream":
                     if delegate_runs.intersection(event.get("parent_ids") or ()):
-                        continue  # token from inside the subagent: don't stream it
+                        continue
                     chunk = event["data"].get("chunk")
-                    token = _content_text(getattr(chunk, "content", "")) if chunk else ""
-                    if token:
-                        yield _sse_token(token)
+                    if not chunk:
+                        continue
 
-                # 3. Stream tool end with brief result summary
+                    # Stream native reasoning tokens (`reasoning_content` / `<think>`) immediately to accordion
+                    reasoning_tok = _extract_reasoning_text(chunk)
+                    if reasoning_tok:
+                        yield _sse_thinking(reasoning_tok)
+
+                    # If chunk has tool_call_chunks, any text in step_token_buffer is pre-tool chatter
+                    if getattr(chunk, "tool_call_chunks", None):
+                        if step_token_buffer:
+                            thought_txt = "".join(step_token_buffer).strip()
+                            step_token_buffer.clear()
+                            if thought_txt:
+                                yield _sse_thinking(thought_txt + "\n")
+                        continue
+
+                    token = _content_text(getattr(chunk, "content", ""))
+                    if token:
+                        step_token_buffer.append(token)
+                        # Once buffered text exceeds 160 chars without triggering a tool call,
+                        # it is definitively the final answer—flush and stream live!
+                        buffered_len = sum(len(x) for x in step_token_buffer)
+                        if buffered_len > 160:
+                            flushed = "".join(step_token_buffer)
+                            step_token_buffer.clear()
+                            emitted_answer_chars += len(flushed.strip())
+                            yield _sse_token(flushed)
+
+                # 3. Tool End -> Update Latency & Capture Evidence
                 elif event_type == "on_tool_end":
+                    run_id = event.get("run_id", "")
                     tool_name = event.get("name", "tool")
                     if tool_name == "ask_deep_analysis_agent":
-                        delegate_runs.discard(event.get("run_id"))
-                    else:
-                        output = event.get("data", {}).get("output", "")
-                        # v2 gives a ToolMessage: use its .content, not str(ToolMessage)
-                        text = " ".join(_content_text(getattr(output, "content", output)).split())
-                        summary = text[:150] + "..." if len(text) > 150 else text
-                        yield _sse_token(f"\n> {summary}\n\n")
+                        delegate_runs.discard(run_id)
 
+                    output_obj = event.get("data", {}).get("output", "")
+                    raw_out = _content_text(getattr(output_obj, "content", output_obj)).strip()
+                    if raw_out:
+                        gathered_tool_outputs.append(f"### Tool `{tool_name}` Output:\n{clip(raw_out, 12000)}")
 
-            yield "data: [DONE]\n\n"
+                    started = tool_start_times.pop(run_id, None)
+                    elapsed_ms = int((time.perf_counter() - started) * 1000) if started else 0
+                    line_cnt = raw_out.count("\n") + 1 if raw_out else 0
+                    yield _sse_event({
+                        "event": "tool_end",
+                        "run_id": run_id,
+                        "tool": tool_name,
+                        "lines": line_cnt,
+                        "latency": f"{elapsed_ms}ms"
+                    })
 
+            # Flush any remaining final answer tokens at the end of the graph run
+            if step_token_buffer:
+                remaining = "".join(step_token_buffer)
+                step_token_buffer.clear()
+                emitted_answer_chars += len(remaining.strip())
+                yield _sse_token(remaining)
+
+        except GraphRecursionError:
+            recursion_hit = True
         except Exception as e:
-            yield f"data: {json.dumps({'error': f'LangGraph Agent Error ({provider}): {str(e)}'})}\n\n"
+            if "recursion" in str(e).lower():
+                recursion_hit = True
+            else:
+                yield _sse_event({"error": f"LangGraph Agent Error ({provider}): {str(e)}"})
+                return
+
+        # Save compact Working Set Cache (~12k chars) for follow-up questions
+        if gathered_tool_outputs:
+            self._last_turn_evidence = clip("\n\n".join(gathered_tool_outputs[-5:]), 12000)
+
+        # Guaranteed Synthesis Guard: if the model stopped after calling tools without writing an answer
+        if (recursion_hit or (had_any_tool_call and emitted_answer_chars < 60)) and gathered_tool_outputs:
+            try:
+                yield _sse_thinking("\nSynthesizing final architectural analysis from retrieved codebase evidence...\n")
+                synthesis_llm = get_chat_model(provider, model_name, api_key)
+                evidence_block = clip("\n\n".join(gathered_tool_outputs), 38000)
+                user_question = messages[-1]["content"] if messages else "Analyze the codebase findings."
+                synthesis_messages = [
+                    SystemMessage(
+                        content=(
+                            "You are ArchGraph Intelligent Agent, a Principal Software Architect.\n"
+                            "You have completed your codebase tool inspections. Using ONLY the retrieved "
+                            "codebase evidence below and earlier conversation context, provide a complete, "
+                            "thorough, and well-structured technical answer to the user's question.\n"
+                            "Always cite exact file paths, function/class names, and line numbers."
+                        )
+                    ),
+                    *dialogue[:-1],
+                    HumanMessage(
+                        content=(
+                            f"## Retrieved Codebase Evidence\n{evidence_block}\n\n"
+                            f"## User Question\n{user_question}\n\n"
+                            "Provide the complete technical analysis and answer now:"
+                        )
+                    ),
+                ]
+                async for synth_chunk in synthesis_llm.astream(synthesis_messages):
+                    synth_reasoning = _extract_reasoning_text(synth_chunk)
+                    if synth_reasoning:
+                        yield _sse_thinking(synth_reasoning)
+                    synth_token = _content_text(getattr(synth_chunk, "content", ""))
+                    if synth_token:
+                        yield _sse_token(synth_token)
+            except Exception as synth_err:
+                yield _sse_event({"error": f"Synthesis fallback error ({provider}): {str(synth_err)}"})
+
+        yield "data: [DONE]\n\n"
+
+        if evicted_pairs_to_summarise and len(evicted_pairs_to_summarise) > self._summarised_up_to:
+            asyncio.create_task(
+                self._update_summary_background(evicted_pairs_to_summarise, provider, model_name, api_key)
+            )

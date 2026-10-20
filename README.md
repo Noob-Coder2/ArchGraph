@@ -1,13 +1,3 @@
----
-title: ArchGraph
-emoji: 🕸️
-colorFrom: green
-colorTo: gray
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # 🕸️ ArchGraph — Agentic Codebase Intelligence & Architectural Audit Engine
 
 **ArchGraph** is a lightweight, privacy-first **"Second-Opinion" Architectural Auditor & Onboarding Platform**. While IDE coding assistants frequently hallucinate across multi-file dependencies because they rely on naive text chunking, ArchGraph combines **Graphify deterministic AST topology** with **local ONNX semantic vectors** so developers can audit blast radius, circular dependencies, and God-nodes before writing or merging code.

@@ -5,30 +5,50 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 
+class GitHubTreeRequest(BaseModel):
+    """Request payload for fetching a repository's interactive file tree via the backend."""
+    repo_url: str = Field(..., description="GitHub repository URL")
+    branch: Optional[str] = Field("main", description="Target branch")
+    token: Optional[str] = Field(None, description="Optional GitHub Personal Access Token")
+
+
+class GitHubTreeResponse(BaseModel):
+    """Response payload returning both flat paths and streamlit-tree-select nodes."""
+    owner: str
+    repo: str
+    branch: str
+    file_count: int
+    tree_nodes: List[Dict[str, Any]]
+    warning: Optional[str] = None
+
+
 class IngestGitHubRequest(BaseModel):
-    """Request payload for ingesting a GitHub repository."""
+    """Request payload for ingesting a GitHub repository via single-request tarball."""
     repo_url: str = Field(..., description="GitHub repository URL")
     branch: Optional[str] = Field("main", description="Target branch")
     token: Optional[str] = Field(None, description="Optional GitHub Personal Access Token")
     selected_paths: Optional[List[str]] = Field(None, description="Optional subset of file paths to ingest")
+    max_files: int = Field(1000, ge=10, le=3000, description="Maximum source files to index")
 
 
 class IngestFilePayload(BaseModel):
-    """Individual file payload for manual or uploaded ingestion."""
+    """Individual file payload supporting either UTF-8 text or Base64 binary (for PDF/DOCX/XLSX)."""
     filename: str
-    content: str
+    content: Optional[str] = ""
+    content_base64: Optional[str] = None
 
 
 class IngestFilesRequest(BaseModel):
-    """Request payload for ingesting raw file contents."""
+    """Request payload for ingesting uploaded files."""
     files: List[IngestFilePayload]
 
 
 class IngestResponse(BaseModel):
-    """Response returned after AST graph extraction and vector embedding."""
+    """Response returned after Graphify AST extraction and FastEmbed vector indexing."""
     session_id: str
     status: str
     file_count: int
+    skipped_files_count: int = 0
     ast_nodes_count: int
     ast_edges_count: int
     vector_chunks_count: int
@@ -47,25 +67,16 @@ class ChatStreamRequest(BaseModel):
     session_id: str
     messages: List[ChatMessage]
     model: str = Field("nvidia/nemotron-3.5-lightning-30b-a3b", description="Model identifier")
-    api_key: str = Field(..., description="Provider API key (NVIDIA NIM or Groq)")
+    api_key: Optional[str] = Field("", description="Provider API key (optional if set in backend .env)")
     provider: str = Field("nvidia", description="Provider name ('nvidia', 'groq', 'anthropic', or 'openai')")
-    is_first_call: bool = Field(False, description="Whether this is the first chat request in the session")
-
-
-class ReportRequest(BaseModel):
-    """Request payload for generating an architectural analysis report."""
-    session_id: str
-    topic: Optional[str] = Field("Comprehensive Architectural & Code Quality Analysis", description="Report focus")
-    model: str = Field("nvidia/nemotron-3-ultra-550b-a55b", description="Model to use for deep reasoning")
-    api_key: str = Field(..., description="Provider API key")
-    export_format: str = Field("markdown", description="'markdown' or 'pdf'")
+    is_first_call: bool = Field(False, description="Deprecated: Repo Map is now auto-injected")
 
 
 class GraphNode(BaseModel):
     """Node representation for interactive graph visualization."""
     id: str
     label: str
-    type: str  # 'file', 'class', 'function', 'module'
+    type: str
     filepath: str
 
 
@@ -73,7 +84,7 @@ class GraphEdge(BaseModel):
     """Directed edge representation between graph nodes."""
     source: str
     target: str
-    relation: str  # 'defines', 'calls', 'imports', 'inherits'
+    relation: str
 
 
 class GraphDataResponse(BaseModel):

@@ -1,1 +1,0 @@
-"""Accessibility utilities and components."""

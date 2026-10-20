@@ -1,4 +1,5 @@
 """
+# TO BE DELETED
 ArchGraph — Tool Timeline Component
 Real-time LangGraph tool execution ledger and dynamic God Nodes telemetry.
 Displays real events as they occur; no static or simulated mock records.

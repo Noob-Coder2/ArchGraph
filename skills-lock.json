@@ -7,6 +7,48 @@
       "skillPath": "plugins/developer-kit-ai/skills/chunking-strategy/SKILL.md",
       "computedHash": "ccbeadb93a8445b58f4da4ea594cd392c71607328eed2a80f3568c16c82648d0"
     },
+    "context-window-design": {
+      "source": "owl-listener/ai-design-skills",
+      "sourceType": "github",
+      "skillPath": "skills/model-interaction-design/context-window-design/SKILL.md",
+      "computedHash": "5c729dca9d8da9d6d474000618988b727f921a4a99d46eb9c8681b7027f88f69"
+    },
+    "context-window-management": {
+      "source": "sickn33/agentic-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/context-window-management/SKILL.md",
+      "computedHash": "80571f449bd943136f09c8264b9ff5db348107904c006e12a92a106decce796b"
+    },
+    "conversation-memory": {
+      "source": "sickn33/agentic-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/conversation-memory/SKILL.md",
+      "computedHash": "06b9d5b5584253072bd1279452a3578c274e1162106a3301da022b9de3da4e46"
+    },
+    "dark-glass-clean-layout": {
+      "source": "mengto/skills",
+      "sourceType": "github",
+      "skillPath": "agent-skills/web-design/dark-glass-clean-layout/SKILL.md",
+      "computedHash": "432d21dce645ab00aa5f80daf1de90d65d25fc1ead942ac9fc65c18d34a8545c"
+    },
+    "design-it": {
+      "source": "sickn33/agentic-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/design-it/SKILL.md",
+      "computedHash": "1e9f652c1d4145c57337f667a5a1ce302f98252cc27f943dc60a44b3e7b32b89"
+    },
+    "design-taste-frontend": {
+      "source": "leonxlnx/taste-skill",
+      "sourceType": "github",
+      "skillPath": "skills/taste-skill/SKILL.md",
+      "computedHash": "41463de84d80d8839b1e9fc8ddfd140578443d095b53710d1f331dbab3079712"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "106acf230014cbb43ca34e6410371321b56ca742f9ee0442e8ec05bf02eb0384"
+    },
     "graphify": {
       "source": "graphify-labs/graphify",
       "sourceType": "github",
@@ -36,6 +78,12 @@
       "sourceType": "github",
       "skillPath": "config/skills/langchain-rag/SKILL.md",
       "computedHash": "cf1cdc8657527ddac4c4d256c73288ec88c9600e0f31d2393324103e9bd503a1"
+    },
+    "langgraph-persistence": {
+      "source": "langchain-ai/langchain-skills",
+      "sourceType": "github",
+      "skillPath": "config/skills/langgraph-persistence/SKILL.md",
+      "computedHash": "7538756e423b3da5ce25b6c7f99070792214a9c7a51510e9579a40a190e88ccd"
     },
     "python-testing-patterns": {
       "source": "wshobson/agents",

@@ -94,6 +94,17 @@ class StorageEngine:
 
                 CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active);
                 CREATE INDEX IF NOT EXISTS idx_session_files_sid ON session_files(session_id);
+                CREATE TABLE IF NOT EXISTS architectural_rules (
+                    session_id TEXT NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    rule_type TEXT NOT NULL,
+                    source_pattern TEXT NOT NULL,
+                    target_pattern TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (session_id, rule_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_arch_rules_sid ON architectural_rules(session_id);
             """)
 
     def _safe_wal_checkpoint(self, conn: sqlite3.Connection):
@@ -242,6 +253,57 @@ class StorageEngine:
         with self._get_connection() as conn:
             cur = conn.execute("SELECT filepath, sha256_hash FROM file_manifests WHERE session_id = ?;", (session_id,))
             return {row['filepath']: row['sha256_hash'] for row in cur.fetchall()}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Architectural Rule Persistence (for audit_against_blueprint)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def save_arch_rule(
+        self,
+        session_id: str,
+        rule_id: str,
+        description: str,
+        rule_type: str,
+        source_pattern: str,
+        target_pattern: str,
+    ) -> None:
+        """Persists one architectural rule for the session."""
+        now = time.time()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO architectural_rules
+                    (session_id, rule_id, description, rule_type, source_pattern, target_pattern, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, rule_id) DO UPDATE SET
+                    description=excluded.description,
+                    rule_type=excluded.rule_type,
+                    source_pattern=excluded.source_pattern,
+                    target_pattern=excluded.target_pattern,
+                    created_at=excluded.created_at;
+                """,
+                (session_id, rule_id, description, rule_type, source_pattern, target_pattern, now),
+            )
+
+    def list_arch_rules(self, session_id: str) -> List[Dict[str, Any]]:
+        """Returns all stored rules for the session."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT rule_id, description, rule_type, source_pattern, target_pattern, created_at
+                FROM architectural_rules WHERE session_id = ? ORDER BY created_at;
+                """,
+                (session_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def delete_arch_rule(self, session_id: str, rule_id: str) -> None:
+        """Deletes one stored rule."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM architectural_rules WHERE session_id = ? AND rule_id = ?;",
+                (session_id, rule_id),
+            )
 
     def delete_session(self, session_id: str):
         """Deletes a session, cascades to all files/artifacts, and truncates WAL."""

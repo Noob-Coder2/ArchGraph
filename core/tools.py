@@ -18,13 +18,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import networkx as nx
+
 from langchain_core.tools import BaseTool, tool
 from services.consolidator import DocumentConsolidator, ASTSurgicalSlicer, SMALL_FILE_LINE_THRESHOLD
+from services.storage import storage
 
 GRAPH_CHARS = 5000          # graph part of search_code
 CHUNK_CHARS = 1500          # each semantic chunk
@@ -224,44 +228,49 @@ def create_codebase_tools(
     @tool
     async def search_code(query: str, follow_call_flow: bool = False) -> str:
         """Find relevant code, docs, symbols, and call-graph neighbors for a topic.
-        START HERE when you do not know exact symbol or file names. Runs AST graph
-        traversal and semantic vector search concurrently and returns both with exact
-        file paths and line numbers.
+        START HERE when you do not know exact symbol or file names. Runs a hybrid
+        fusion (FastEmbed vectors + lexical AST matching + Personalized PageRank
+        over the Graphify AST graph via Reciprocal Rank Fusion) and returns ranked
+        results with exact file paths and line numbers.
         """
-        async def graph_part() -> Tuple[Any, Optional[str]]:
-            if graph is None:
-                return None, None
-            kw: Dict[str, Any] = {"mode": "dfs" if follow_call_flow else "bfs"}
-            if _accepts(graph.query_traversal, "budget"):
-                kw["budget"] = 2000
-            return await _run(graph.query_traversal, query, **kw)
+        from core.hybrid_retriever import HybridFusionRetriever
 
-        async def vector_part() -> Tuple[Any, Optional[str]]:
-            if vector is None:
-                return None, None
-            return await _run(vector.retrieve, query, top_k=SEMANTIC_TOP_K, file_type=None)
-
-        (g_out, g_err), (v_out, v_err) = await asyncio.gather(graph_part(), vector_part())
+        retriever = HybridFusionRetriever(graph, vector)
+        fused, err = await _run(retriever.retrieve, query, top_k=SEMANTIC_TOP_K)
+        if err:
+            return f"search_code failed: {err}"
+        if not fused:
+            return "## Hybrid Search Results\nNo results."
 
         parts: List[str] = []
-        if g_out:
-            parts.append("## Graph Context & Connected Symbols\n" + clip(g_out, GRAPH_CHARS))
-        if v_out:
-            formatted_chunks, top_files = _format_chunks(v_out)
-            parts.append("## Semantic Code & Doc Matches\n" + formatted_chunks)
-            if len(top_files) >= 2:
-                sample_list = ", ".join(f'"{fp}"' for fp in top_files[:4])
-                parts.append(
-                    f"💡 **Next Step Tip:** To inspect these related files together in one call, "
-                    f"use `consolidate_files([{sample_list}])` (or `filepath::SymbolName` for huge files)."
-                )
+        results = fused.get("results", [])
+        if results:
+            lines: List[str] = [
+                "## Hybrid Search Results (vector + lexical AST + graph PPR, RRF fused)"
+            ]
+            for i, r in enumerate(results, start=1):
+                channel = r.get("channel", "?")
+                rtype = r.get("type", "?")
+                fp = r.get("filepath", "unknown")
+                sym = r.get("symbol") or ""
+                s = r.get("start_line")
+                e = r.get("end_line")
+                loc = f":{s}-{e}" if s and e else (f":{s}" if s else "")
+                rrf = r.get("rrf_score", 0.0)
+                content = clip(r.get("content", ""), CHUNK_CHARS)
+                head = f"[{i}] `{fp}{loc}`"
+                if sym:
+                    head += f"  ({rtype}: `{sym}`)"
+                head += f"  [channel={channel} rrf={rrf:.4f}]"
+                lines.append(f"{head}\n{content}")
+            parts.append("\n".join(lines))
+        else:
+            parts.append("## Hybrid Search Results\nNo results.")
 
-        notes = [f"{name} search failed: {err}" for name, err in (("graph", g_err), ("semantic", v_err)) if err]
-        if not parts:
-            msg = "No results. Try different keywords, an exact symbol name, or list_files()."
-            return msg + (" (" + "; ".join(notes) + ")" if notes else "")
-        if notes:
-            parts.append("Note: " + "; ".join(notes))
+        if graph is None:
+            parts.append("Note: graph search unavailable (no GraphifyEngine bound).")
+        if vector is None:
+            parts.append("Note: semantic search unavailable (no LlamaIndexEngine bound).")
         return clip("\n\n".join(parts), MAX_TOOL_CHARS)
 
     @tool
@@ -467,4 +476,431 @@ def create_codebase_tools(
             return f"consolidate_files failed: {err}"
         return clip(out, CONSOLIDATE_CHARS)
 
-    return [search_code, explain_symbol, trace_path, read_file, list_files, consolidate_files]
+    # ------------------------------------------------------------------
+    # Tool 7: audit_blast_radius — "If I change X, what breaks?"
+    # ------------------------------------------------------------------
+    @tool
+    async def audit_blast_radius(
+        symbol: str,
+        max_hops: int = 3,
+        filepath: Optional[str] = None,
+        top_k_per_hop: int = 10,
+    ) -> str:
+        """
+        Upstream impact analysis: if symbol `symbol` changes, which callers
+        (direct and transitive) are affected?
+
+        - Multi-seed resolution: finds ALL matching definitions across the
+          codebase (or narrows to one file via `filepath::Symbol`).
+        - Upstream ripple traversal: reverses the DiGraph and runs BFS from
+          each seed, walking caller -> callee backwards (Hop 1 = direct
+          callers, Hop 2 = callers of callers, etc.).
+        - Chain reconstruction: for every impacted caller, prints the exact
+          breadcrumb trail of relationships back to the changed symbol.
+        - Hybrid relevance ranking: callers at each hop are ranked by
+          in-degree centrality (how many depend on them) so critical
+          business logic surfaces first.
+        - Circular dependency warning: flags if the symbol sits inside an
+          import/call cycle.
+        """
+        if graph is None:
+            return "No code graph is available for this session."
+
+        g: nx.DiGraph = graph.graph
+        if g.number_of_nodes() == 0:
+            return "Code graph is empty. Please ingest a codebase first."
+
+        # ------------------------------------------------------------------
+        # 1. Multi-seed symbol resolution
+        # ------------------------------------------------------------------
+        raw = symbol.strip()
+        # Split "filepath::Symbol" or "ClassName.method" or just "symbol"
+        if "::" in raw:
+            filepath_hint, target = raw.split("::", 1)
+        else:
+            filepath_hint, target = None, raw
+
+        # target may be "ClassName.method" — split into parts
+        target_parts = [p for p in target.split(".") if p]
+        target_last = target_parts[-1] if target_parts else target
+        target_low = target_last.lower()
+
+        # Effective filepath filter: explicit arg overrides :: hint
+        eff_filepath = filepath if filepath is not None else filepath_hint
+
+        seeds: list[str] = []
+        for n, data in g.nodes(data=True):
+            n_fp = str(data.get("filepath") or data.get("source_file", ""))
+            n_label = str(data.get("label", n))
+            n_id = str(n)
+
+            # Normalize label: strip leading '.', trailing '()', e.g. ".authenticate()" -> "authenticate"
+            norm_label = n_label.lstrip(".").rstrip("()").rstrip(")")
+            norm_label_low = norm_label.lower()
+
+            # Match if any target part matches the label or the last node-id segment
+            matched = False
+            if norm_label_low == target_low:
+                matched = True
+            elif target_parts and len(target_parts) > 1:
+                # ClassName.method: label might be just the method name
+                if norm_label_low == target_parts[-1].lower():
+                    matched = True
+            # Node ID uses underscores: services_auth_authservice_authenticate
+            id_parts = n_id.split("_")
+            if target_last.lower() in [p.lower() for p in id_parts[-3:]]:
+                matched = True
+
+            if matched:
+                # Filepath filter
+                if eff_filepath is not None:
+                    if n_fp == eff_filepath or n_fp.endswith(eff_filepath) or eff_filepath in n_fp:
+                        seeds.append(n_id)
+                else:
+                    seeds.append(n_id)
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        seeds = [s for s in seeds if not (s in seen or seen.add(s))]
+
+        if not seeds:
+            hint = f" in file '{filepath}'" if filepath else ""
+            return (
+                f"Symbol '{symbol}' was not found in the code graph{hint}. "
+                "Use `search_code` or `list_files` to find the exact name."
+            )
+
+        # ------------------------------------------------------------------
+        # 2. Upstream ripple traversal (reversed BFS)
+        # ------------------------------------------------------------------
+        # g is a DiGraph where edge A -> B means "A calls/depends on B".
+        # To find who would break if B changes, walk predecessors:
+        # Hop 1 = direct callers of seed, Hop 2 = callers of callers, etc.
+        visited: dict[str, tuple[str | None, int | None, str | None]] = {}
+        # node -> (parent_node, hop, relation)
+
+        queue: list[tuple[str, int, str | None]] = [(s, 0, None) for s in seeds]
+        for s in seeds:
+            visited[s] = (None, 0, None)
+
+        head = 0
+        while head < len(queue):
+            node, hop, rel = queue[head]
+            head += 1
+            if hop >= max_hops:
+                continue
+            for parent in g.predecessors(node):
+                if parent not in visited:
+                    edge_data = g.get_edge_data(parent, node) or {}
+                    edge_rel = edge_data.get("relation", "calls")
+                    visited[parent] = (node, hop + 1, edge_rel)
+                    queue.append((parent, hop + 1, edge_rel))
+
+        # ------------------------------------------------------------------
+        # 3. Circular dependency warning
+        # ------------------------------------------------------------------
+        cycle_warning = ""
+        try:
+            cycle = nx.find_cycle(g, orientation="original")
+            cycle_nodes = [u for u, _, _ in cycle]
+            if any(s in cycle_nodes for s in seeds):
+                cycle_warning = (
+                    "\n\n⚠️  CIRCULAR DEPENDENCY DETECTED: "
+                    + " -> ".join(str(n) for n in cycle_nodes + [cycle_nodes[0]])
+                    + ". Changes inside this cycle propagate unpredictably."
+                )
+        except nx.NetworkXNoCycle:
+            pass
+
+        # ------------------------------------------------------------------
+        # 4. Build chain reconstructions + rank per hop
+        # ------------------------------------------------------------------
+        def _reconstruct_chain(end_node: str) -> list[tuple[str, str, str, int]]:
+            """Returns list of (node, label, relation, hop) from seed to end_node."""
+            chain: list[tuple[str, str, str, int]] = []
+            cur: str | None = end_node
+            while cur is not None and cur in visited:
+                parent, hop, rel = visited[cur]
+                node_data = g.nodes.get(cur, {})
+                label = str(node_data.get("label", cur))
+                fp = str(node_data.get("filepath") or node_data.get("source_file", "unknown"))
+                chain.append((f"{fp}::{label}", label, rel or "seed", hop or 0))
+                cur = parent
+            chain.reverse()
+            return chain
+
+        # Group impacted callers by hop
+        hop_groups: dict[int, list[tuple[str, str, str, int, list]]] = {}
+        for node, (parent, hop, rel) in visited.items():
+            if hop == 0 or node in seeds:
+                continue  # skip seeds themselves
+            hop_int = hop if hop is not None else 0
+            node_data = g.nodes.get(node, {})
+            label = str(node_data.get("label", node))
+            fp = str(node_data.get("filepath") or node_data.get("source_file", "unknown"))
+            full_id = f"{fp}::{label}"
+            chain = _reconstruct_chain(node)
+            # Rank by in-degree (how many depend on this caller)
+            rank_score = g.in_degree(node)
+            hop_groups.setdefault(hop_int, []).append(
+                (full_id, label, rel or "calls", rank_score, chain)
+            )
+
+        # Sort each hop by rank score (descending)
+        for hop in hop_groups:
+            hop_groups[hop].sort(key=lambda x: x[3], reverse=True)
+            hop_groups[hop] = hop_groups[hop][:top_k_per_hop]
+
+        # ------------------------------------------------------------------
+        # 5. Format output
+        # ------------------------------------------------------------------
+        lines: list[str] = []
+        seed_names = ", ".join(str(s) for s in seeds)
+        lines.append(f"# Blast Radius: `{symbol}`")
+        lines.append(f"Seeds: {seed_names}")
+        lines.append(f"Max hops: {max_hops} | Total impacted callers: {len(visited) - len(seeds)}")
+        if cycle_warning:
+            lines.append(cycle_warning)
+
+        if not hop_groups:
+            lines.append("\nNo upstream callers found within the hop limit.")
+            return "\n".join(lines)
+
+        for hop in sorted(hop_groups.keys()):
+            lines.append(f"\n## Hop {hop} — Direct {'callers' if hop == 1 else 'transitive callers'}")
+            for full_id, label, rel, rank_score, chain in hop_groups[hop]:
+                chain_str = " <- ".join(reversed([c[0] for c in chain]))
+                lines.append(
+                    f"  - `{full_id}` (dependents: {rank_score}, link: {rel})"
+                )
+                lines.append(f"      Chain: {chain_str}")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Tool 8: audit_against_blueprint — "Does code match planned architecture?"
+    # ------------------------------------------------------------------
+    @tool
+    async def audit_against_blueprint(
+        blueprint: str,
+        action: str = "verify",
+    ) -> str:
+        """
+        Two-stage hybrid architectural verification.
+
+        Actions:
+        - "discover": Returns macro-flow X-ray (module-to-module link counts,
+          communities, circular import cycles) — no rules needed.
+        - "store": `blueprint` is a JSON array of rules. Each rule:
+            {rule_id, description, rule_type ("forbidden"|"required"),
+             source_pattern, target_pattern}
+          Rules are persisted in the session SQLite database.
+        - "verify": Loads all stored rules and checks them deterministically
+          against the AST graph. Forbidden rules flag any crossing edge as a
+          violation (drift). Required rules verify at least one crossing edge
+          exists. Evidence includes filepath:start_line-end_line citations.
+        """
+        if graph is None:
+            return "No code graph is available for this session."
+
+        g: nx.DiGraph = graph.graph
+        session_id = graph.session_id
+
+        if action == "discover":
+            return _discover_macro_flows(g)
+
+        if action == "store":
+            try:
+                rules = json.loads(blueprint)
+            except json.JSONDecodeError as exc:
+                return f"Invalid JSON blueprint: {exc}"
+
+            if not isinstance(rules, list):
+                return "Blueprint must be a JSON array of rule objects."
+
+            stored = 0
+            for rule in rules:
+                rid = rule.get("rule_id", f"rule_{stored}")
+                storage.save_arch_rule(
+                    session_id=session_id,
+                    rule_id=rid,
+                    description=rule.get("description", ""),
+                    rule_type=rule.get("rule_type", "forbidden"),
+                    source_pattern=rule.get("source_pattern", ""),
+                    target_pattern=rule.get("target_pattern", ""),
+                )
+                stored += 1
+            return f"Stored {stored} architectural rule(s) for session {session_id[:8]}."
+
+        if action == "verify":
+            rules = storage.list_arch_rules(session_id)
+            if not rules:
+                return (
+                    "No architectural rules stored yet. "
+                    "Call with action='store' to persist rules first, "
+                    "or action='discover' for a macro-flow X-ray."
+                )
+
+            return _verify_rules(g, rules, vector)
+
+        return f"Unknown action '{action}'. Use 'discover', 'store', or 'verify'."
+
+    def _match_pattern(path: str, pattern: str) -> bool:
+        """Simple glob-style match: 'api/*' matches 'api/routes.py'."""
+        if pattern == "*":
+            return True
+        if pattern.endswith("/*"):
+            prefix = pattern[:-2]
+            return path == prefix or path.startswith(prefix + "/")
+        return path == pattern or path.startswith(pattern + "/") or path == pattern
+
+    def _discover_macro_flows(g: nx.DiGraph) -> str:
+        """Stage 1: module-level aggregation + communities + cycles."""
+        from collections import Counter
+
+        # Aggregate edges at top-level module level
+        module_links: Counter[tuple[str, str]] = Counter()
+        for u, v, data in g.edges(data=True):
+            u_fp = str(g.nodes[u].get("filepath") or g.nodes[u].get("source_file", ""))
+            v_fp = str(g.nodes[v].get("filepath") or g.nodes[v].get("source_file", ""))
+            u_mod = u_fp.split("/", 1)[0] if "/" in u_fp else "(root)"
+            v_mod = v_fp.split("/", 1)[0] if "/" in v_fp else "(root)"
+            if u_mod != v_mod:
+                module_links[(u_mod, v_mod)] += 1
+
+        lines: list[str] = []
+        lines.append("# Architectural Discovery (Macro Flows)")
+        lines.append("## Module-to-Module Dependency Links")
+        if module_links:
+            for (src, tgt), count in module_links.most_common(20):
+                lines.append(f"  {src} -> {tgt}: {count} link(s)")
+        else:
+            lines.append("  (no cross-module links detected)")
+
+        # Communities
+        if graph.communities:
+            lines.append(f"\n## Detected Communities: {len(graph.communities)}")
+            for cid, members in list(graph.communities.items())[:10]:
+                sample = ", ".join(str(m) for m in members[:3])
+                lines.append(f"  Community {cid}: {len(members)} node(s) — e.g. {sample}")
+
+        # Cycles
+        try:
+            cycle = nx.find_cycle(g, orientation="original")
+            cycle_nodes = [u for u, _ in cycle]
+            lines.append(
+                f"\n⚠️  Circular dependency: "
+                + " -> ".join(str(n) for n in cycle_nodes + [cycle_nodes[0]])
+            )
+        except nx.NetworkXNoCycle:
+            lines.append("\n✓ No circular dependencies detected.")
+
+        return "\n".join(lines)
+
+    def _verify_rules(
+        g: nx.DiGraph,
+        rules: list[dict],
+        vector_engine: Any,
+    ) -> str:
+        """Stage 3: deterministic verification + hybrid evidence."""
+        from core.hybrid_retriever import HybridFusionRetriever
+
+        retriever = HybridFusionRetriever(graph, vector_engine)
+
+        lines: list[str] = []
+        lines.append("# Architectural Compliance Verification")
+        total_violations = 0
+
+        for rule in rules:
+            rid = rule["rule_id"]
+            rtype = rule["rule_type"]
+            src_pat = rule["source_pattern"]
+            tgt_pat = rule["target_pattern"]
+            desc = rule["description"]
+
+            violations: list[dict] = []
+            for u, v, data in g.edges(data=True):
+                u_fp = str(g.nodes[u].get("filepath") or g.nodes[u].get("source_file", ""))
+                v_fp = str(g.nodes[v].get("filepath") or g.nodes[v].get("source_file", ""))
+                u_label = str(g.nodes[u].get("label", u))
+                v_label = str(g.nodes[v].get("label", v))
+                u_full = f"{u_fp}::{u_label}"
+                v_full = f"{v_fp}::{v_label}"
+
+                src_match = _match_pattern(u_full, src_pat) or _match_pattern(u_fp, src_pat)
+                tgt_match = _match_pattern(v_full, tgt_pat) or _match_pattern(v_fp, tgt_pat)
+
+                if src_match and tgt_match:
+                    if rtype == "forbidden":
+                        violations.append(
+                            {
+                                "source": u_full,
+                                "target": v_full,
+                                "relation": data.get("relation", "calls"),
+                                "source_file": u_fp,
+                                "target_file": v_fp,
+                            }
+                        )
+                    elif rtype == "required":
+                        # Required rule satisfied by at least one edge
+                        pass
+
+            if rtype == "forbidden":
+                if violations:
+                    total_violations += len(violations)
+                    lines.append(f"\n❌ VIOLATION (DRIFT) — Rule '{rid}': {desc}")
+                    lines.append(f"   Forbidden: {src_pat} -> {tgt_pat}")
+                    for v in violations[:10]:
+                        # Get line-number evidence via hybrid retriever
+                        evidence = retriever.retrieve(
+                            f"{v['source']} calls {v['target']}", top_k=2
+                        )
+                        loc_info = ""
+                        for res in evidence.get("results", []):
+                            fp = res.get("filepath", "")
+                            s = res.get("start_line")
+                            e = res.get("end_line")
+                            if fp and s and e:
+                                loc_info = f" ({fp}:{s}-{e})"
+                                break
+                        lines.append(
+                            f"   - {v['source']} --[{v['relation']}]--> {v['target']}{loc_info}"
+                        )
+                else:
+                    lines.append(f"\n✓ COMPLIANT — Rule '{rid}': {desc}")
+            elif rtype == "required":
+                # Check if at least one edge satisfies the required link
+                satisfied = any(
+                    _match_pattern(
+                        str(g.nodes[u].get("filepath") or g.nodes[u].get("source_file", "")),
+                        src_pat,
+                    )
+                    and _match_pattern(
+                        str(g.nodes[v].get("filepath") or g.nodes[v].get("source_file", "")),
+                        tgt_pat,
+                    )
+                    for u, v in g.edges()
+                )
+                if satisfied:
+                    lines.append(f"\n✓ COMPLIANT — Rule '{rid}': {desc}")
+                else:
+                    total_violations += 1
+                    lines.append(
+                        f"\n❌ VIOLATION (MISSING) — Rule '{rid}': {desc}"
+                    )
+                    lines.append(f"   Required: {src_pat} -> {tgt_pat}")
+                    lines.append("   No AST edge found connecting source to target patterns.")
+
+        lines.append(f"\n## Summary: {total_violations} violation(s) across {len(rules)} rule(s)")
+        return "\n".join(lines)
+
+    return [
+        search_code,
+        explain_symbol,
+        trace_path,
+        read_file,
+        list_files,
+        consolidate_files,
+        audit_blast_radius,
+        audit_against_blueprint,
+    ]

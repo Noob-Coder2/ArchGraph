@@ -38,6 +38,7 @@ class LlamaIndexEngine:
         self.splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=64)
         self.documents: List[Document] = []
         self.index: Optional[VectorStoreIndex] = None
+        self.chunks_count: int = 0
 
     def clear(self):
         """Clears indexed documents and resets index."""
@@ -95,7 +96,12 @@ class LlamaIndexEngine:
         """
         Builds in-memory VectorStoreIndex across added documents and attaches
         exact `start_line` and `end_line` metadata to each chunk.
+        Raw documents are released from RAM once the index is built; the index
+        nodes already carry the line-number metadata, so the document list is
+        redundant and Graphify-style RAM spilling is not needed for vectors.
         """
+        if self.index is not None:
+            return
         if not self.documents:
             return
 
@@ -117,6 +123,8 @@ class LlamaIndexEngine:
                     node.metadata["end_line"] = end_line
 
         self.index = VectorStoreIndex(nodes, embed_model=self.embed_model)
+        self.chunks_count = len(nodes)
+        self.documents.clear()
 
     def retrieve(self, query: str, top_k: int = 5, file_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """Performs semantic similarity retrieval with optional file_type filtering."""

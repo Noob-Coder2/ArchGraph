@@ -3,11 +3,15 @@ Frontend API Client Adapter (100% Decoupled from Backend Services)
 Communicates strictly over HTTP with the FastAPI Intelligence Engine (:8000).
 """
 import base64
+import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import requests
 
 BINARY_DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"}
+
+DEFAULT_POLL_INTERVAL = 2.0
+DEFAULT_POLL_TIMEOUT = 600.0
 
 
 class APIClient:
@@ -41,6 +45,35 @@ class APIClient:
         except Exception as exc:
             return {"status": "error", "detail": str(exc)}
 
+    def _poll_job(self, job_id: str, poll_interval: float = DEFAULT_POLL_INTERVAL, timeout: float = DEFAULT_POLL_TIMEOUT) -> Dict[str, Any]:
+        """Poll /api/ingest/jobs/{job_id} until the job reaches a terminal state."""
+        poll_url = f"{self.base_url}/api/ingest/jobs/{job_id}"
+        deadline = time.time() + timeout
+        last_data: Dict[str, Any] = {}
+        while time.time() < deadline:
+            try:
+                poll = requests.get(poll_url, timeout=(10, 30))
+                if poll.status_code == 200:
+                    last_data = poll.json()
+                    status = last_data.get("status")
+                    if status == "completed":
+                        return last_data.get("result") or {"status": "completed", "job_id": job_id}
+                    if status == "failed":
+                        return {
+                            "status": "error",
+                            "detail": last_data.get("error", "Ingestion job failed"),
+                            "job_id": job_id,
+                        }
+            except Exception:
+                pass
+            time.sleep(poll_interval)
+        return {
+            "status": "error",
+            "detail": f"Ingestion job {job_id} did not complete within {timeout}s",
+            "job_id": job_id,
+            "last": last_data,
+        }
+
     def ingest_github_backend(
         self,
         repo_url: str,
@@ -49,7 +82,7 @@ class APIClient:
         selected_paths: Optional[List[str]] = None,
         max_files: int = 1000,
     ) -> Dict[str, Any]:
-        """Triggers single-request GitHub tarball ingestion on FastAPI backend."""
+        """Triggers GitHub tarball ingestion and polls until the job completes."""
         url = f"{self.base_url}/api/ingest/github"
         payload = {
             "repo_url": repo_url,
@@ -59,16 +92,20 @@ class APIClient:
             "max_files": max_files,
         }
         try:
-            res = requests.post(url, json=payload, timeout=(10, 600))
-            if res.status_code == 200:
-                return res.json()
-            try:
-                detail = res.json().get("detail", res.text)
-            except Exception:
-                detail = res.text
-            return {"status": "error", "detail": detail}
+            res = requests.post(url, json=payload, timeout=(10, 30))
+            if res.status_code != 200:
+                try:
+                    detail = res.json().get("detail", res.text)
+                except Exception:
+                    detail = res.text
+                return {"status": "error", "detail": detail}
+            job = res.json()
+            job_id = job.get("job_id")
+            if not job_id:
+                return {"status": "error", "detail": "Backend did not return a job_id."}
         except Exception as exc:
             return {"status": "error", "detail": str(exc)}
+        return self._poll_job(job_id)
 
     def ingest_files_backend(self, files: List[Any]) -> Optional[Dict[str, Any]]:
         """
@@ -98,12 +135,16 @@ class APIClient:
                 payload["files"].append({"filename": name, "content": text_str, "content_base64": None})
 
         try:
-            res = requests.post(url, json=payload, timeout=(10, 600))
-            if res.status_code == 200:
-                return res.json()
-            return None
+            res = requests.post(url, json=payload, timeout=(10, 30))
+            if res.status_code != 200:
+                return None
+            job = res.json()
+            job_id = job.get("job_id")
+            if not job_id:
+                return None
         except Exception:
             return None
+        return self._poll_job(job_id)
 
     def get_graph_data_backend(self, session_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -116,7 +157,6 @@ class APIClient:
 
     def get_graph_html_backend(self, session_id: str) -> Optional[str]:
         try:
-            res = requests.get(f"{self.base_url}/api/graph/{session_id}", timeout=(10, 60))
             res_html = requests.get(f"{self.base_url}/api/graph/{session_id}/html", timeout=(10, 60))
             if res_html.status_code == 200:
                 return res_html.text

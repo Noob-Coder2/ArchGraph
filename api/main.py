@@ -14,8 +14,10 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -32,6 +34,7 @@ from api.models import (
     GitHubTreeRequest,
     GitHubTreeResponse,
     GraphDataResponse,
+    IngestFilePayload,
     IngestFilesRequest,
     IngestGitHubRequest,
     IngestResponse,
@@ -48,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "25"))
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
+MAX_INGESTION_JOBS = int(os.getenv("MAX_INGESTION_JOBS", "200"))
 
 
 class SessionContainer:
@@ -65,6 +70,26 @@ class SessionContainer:
 SESSIONS: Dict[str, SessionContainer] = {}
 
 
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class IngestionJob:
+    job_id: str
+    status: JobStatus = JobStatus.QUEUED
+    progress: str = ""
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+
+
+INGESTION_JOBS: Dict[str, IngestionJob] = {}
+
+
 async def purge_expired_sessions():
     """Purges expired sessions and frees SQLite WAL memory."""
     now = time.time()
@@ -80,6 +105,22 @@ async def purge_expired_sessions():
         await asyncio.to_thread(storage.delete_session, oldest_sid)
 
 
+async def purge_expired_jobs():
+    """Purges stale ingestion jobs so INGESTION_JOBS does not grow unboundedly."""
+    now = time.time()
+    expired = [
+        jid
+        for jid, j in list(INGESTION_JOBS.items())
+        if now - j.created_at > JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        INGESTION_JOBS.pop(jid, None)
+
+    while len(INGESTION_JOBS) > MAX_INGESTION_JOBS:
+        oldest_jid = min(INGESTION_JOBS.keys(), key=lambda k: INGESTION_JOBS[k].created_at)
+        INGESTION_JOBS.pop(oldest_jid, None)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing storage and pre-warming BAAI/bge-small-en-v1.5 ONNX model...")
@@ -91,6 +132,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(300)
             try:
                 await purge_expired_sessions()
+                await purge_expired_jobs()
             except Exception as exc:
                 logger.error("Session cleanup exception: %s", exc)
 
@@ -98,6 +140,7 @@ async def lifespan(app: FastAPI):
     yield
     task.cancel()
     SESSIONS.clear()
+    INGESTION_JOBS.clear()
     await asyncio.to_thread(storage.cleanup_all_on_startup)
 
 
@@ -181,11 +224,9 @@ async def fetch_github_tree(req: GitHubTreeRequest):
     )
 
 
-@app.post("/api/ingest/github", response_model=IngestResponse)
+@app.post("/api/ingest/github")
 async def ingest_github_repo(req: IngestGitHubRequest):
-    """
-    Ingests repository files in 1 compressed tarball stream using GitHubService.fetch_repo_archive.
-    """
+    """Queues a GitHub tarball ingestion job. Returns a job ID for polling."""
     token = (req.token or "").strip() or os.getenv("GITHUB_TOKEN")
     parsed = GitHubService.parse_github_url(req.repo_url)
     if not parsed:
@@ -196,16 +237,94 @@ async def ingest_github_repo(req: IngestGitHubRequest):
     if branch == "main":
         branch = await GitHubService.fetch_default_branch(owner, repo, token=token)
 
+    job_id = str(uuid.uuid4())
+    job = IngestionJob(job_id=job_id)
+    INGESTION_JOBS[job_id] = job
+    asyncio.create_task(
+        _run_ingestion_job(
+            job_id=job_id,
+            kind="github",
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            token=token,
+            selected_paths=req.selected_paths,
+            max_files=req.max_files,
+        )
+    )
+    return {"job_id": job_id, "status": JobStatus.QUEUED}
+
+
+@app.post("/api/ingest/files")
+async def ingest_files(req: IngestFilesRequest):
+    """Queues a file-upload ingestion job. Returns a job ID for polling."""
+    if not req.files:
+        raise HTTPException(status_code=400, detail="No files provided in request.")
+
+    job_id = str(uuid.uuid4())
+    job = IngestionJob(job_id=job_id)
+    INGESTION_JOBS[job_id] = job
+    asyncio.create_task(
+        _run_ingestion_job(
+            job_id=job_id,
+            kind="files",
+            files=req.files,
+        )
+    )
+    return {"job_id": job_id, "status": JobStatus.QUEUED}
+
+
+@app.get("/api/ingest/jobs/{job_id}")
+async def get_ingestion_job(job_id: str):
+    """Poll for ingestion job status and result."""
+    # Yield once so any background ingestion task scheduled via create_task
+    # gets a chance to advance on this event loop (important under TestClient
+    # and single-worker uvicorn where requests are cooperative).
+    await asyncio.sleep(0)
+    job = INGESTION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "result": job.result,
+        "error": job.error,
+    }
+
+
+@app.get("/api/ingest/jobs")
+async def list_ingestion_jobs():
+    """List all ingestion jobs (most recent first)."""
+    return [
+        {
+            "job_id": j.job_id,
+            "status": j.status,
+            "progress": j.progress,
+            "created_at": j.created_at,
+        }
+        for j in sorted(INGESTION_JOBS.values(), key=lambda j: j.created_at, reverse=True)
+    ]
+
+
+async def _ingest_github_logic(
+    owner: str,
+    repo: str,
+    branch: str,
+    token: Optional[str],
+    selected_paths: Optional[List[str]],
+    max_files: int,
+) -> IngestResponse:
     extracted_files, skipped_count, err = await GitHubService.fetch_repo_archive(
         owner=owner,
         repo=repo,
         branch=branch,
         token=token,
-        selected_paths=req.selected_paths,
-        max_files=req.max_files,
+        selected_paths=selected_paths,
+        max_files=max_files,
     )
     if err or not extracted_files:
-        raise HTTPException(status_code=400, detail=err or "No valid source files found to index.")
+        raise RuntimeError(err or "No valid source files found to index.")
 
     session = await create_fresh_session()
     CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs"}
@@ -218,6 +337,7 @@ async def ingest_github_repo(req: IngestGitHubRequest):
             session.graphify.add_file(fpath, content)
             session.vector_engine.add_file(fpath, content, file_type="code")
         elif ext in TEXT_EXTS:
+            session.graphify.add_file(fpath, content)
             session.vector_engine.add_file(fpath, content, file_type="document")
         else:
             session.graphify.add_file(fpath, content)
@@ -234,25 +354,20 @@ async def ingest_github_repo(req: IngestGitHubRequest):
         skipped_files_count=skipped_count,
         ast_nodes_count=graph_result["nodes"],
         ast_edges_count=graph_result["edges"],
-        vector_chunks_count=len(session.vector_engine.documents),
+        vector_chunks_count=session.vector_engine.chunks_count,
         communities_count=graph_result.get("communities", 0),
         god_nodes_count=graph_result.get("god_nodes", 0),
     )
 
 
-@app.post("/api/ingest/files", response_model=IngestResponse)
-async def ingest_files(req: IngestFilesRequest):
-    """Ingests uploaded files with backend MarkItDown decoding for binary PDFs/DOCX."""
-    if not req.files:
-        raise HTTPException(status_code=400, detail="No files provided in request.")
-
+async def _ingest_files_logic(files: List[IngestFilePayload]) -> IngestResponse:
     session = await create_fresh_session()
     RICH_DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"}
     CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs"}
     TEXT_EXTS = {".md", ".txt", ".rst"}
 
     indexed_count = 0
-    for item in req.files:
+    for item in files:
         ext = Path(item.filename).suffix.lower()
         content = item.content or ""
 
@@ -271,6 +386,7 @@ async def ingest_files(req: IngestFilesRequest):
 
         indexed_count += 1
         if ext in RICH_DOC_EXTS or ext in TEXT_EXTS:
+            session.graphify.add_file(item.filename, content)
             session.vector_engine.add_file(item.filename, content, file_type="document")
         elif ext in CODE_EXTS:
             session.graphify.add_file(item.filename, content)
@@ -287,13 +403,34 @@ async def ingest_files(req: IngestFilesRequest):
         session_id=session.session_id,
         status="success",
         file_count=indexed_count,
-        skipped_files_count=len(req.files) - indexed_count,
+        skipped_files_count=len(files) - indexed_count,
         ast_nodes_count=graph_result["nodes"],
         ast_edges_count=graph_result["edges"],
-        vector_chunks_count=len(session.vector_engine.documents),
+        vector_chunks_count=session.vector_engine.chunks_count,
         communities_count=graph_result.get("communities", 0),
         god_nodes_count=graph_result.get("god_nodes", 0),
     )
+
+
+async def _run_ingestion_job(job_id: str, kind: str, **kwargs: Any) -> None:
+    job = INGESTION_JOBS[job_id]
+    job.status = JobStatus.RUNNING
+    job.progress = "ingestion started"
+    try:
+        if kind == "github":
+            result = await _ingest_github_logic(**kwargs)
+        elif kind == "files":
+            result = await _ingest_files_logic(**kwargs)
+        else:
+            raise ValueError(f"Unknown ingestion kind: {kind}")
+        job.result = result.model_dump()
+        job.status = JobStatus.COMPLETED
+        job.progress = "completed"
+    except Exception as exc:
+        logger.error("Ingestion job %s (%s) failed: %s", job_id, kind, exc, exc_info=True)
+        job.error = str(exc)
+        job.status = JobStatus.FAILED
+        job.progress = "failed"
 
 
 @app.get("/api/graph/{session_id}", response_model=GraphDataResponse)

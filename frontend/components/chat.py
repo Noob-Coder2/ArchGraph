@@ -131,13 +131,23 @@ def stream_inline_turn(
                 elif event_kind == "tool_end":
                     run_id = parsed.get("run_id", "")
                     tool_name = parsed.get("tool", "")
-                    for item in reversed(tools_log):
-                        if (run_id and item.get("run_id") == run_id) or (
-                            item.get("tool") == tool_name and item.get("latency") == "running..."
-                        ):
-                            item["latency"] = parsed.get("latency", "done")
-                            item["lines"] = parsed.get("lines", 0)
-                            break
+                    matched = False
+                    # 1. Strict run_id correlation (handles parallel calls to same tool)
+                    if run_id:
+                        for item in tools_log:
+                            if item.get("run_id") == run_id:
+                                item["latency"] = parsed.get("latency", "done")
+                                item["lines"] = parsed.get("lines", 0)
+                                matched = True
+                                break
+                    # 2. Fallback: match by tool_name + "running..." (single call path)
+                    if not matched and not run_id:
+                        for item in reversed(tools_log):
+                            if item.get("tool") == tool_name and item.get("latency") == "running...":
+                                item["latency"] = parsed.get("latency", "done")
+                                item["lines"] = parsed.get("lines", 0)
+                                matched = True
+                                break
                     _refresh_trace()
 
                 # 4. Final Answer Token Frame

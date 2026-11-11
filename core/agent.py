@@ -338,6 +338,8 @@ class CodebaseAgent:
             "list_files": "Exploring repository directory structure",
             "consolidate_files": "Hydrating surgical multi-file audit bundle",
             "ask_deep_analysis_agent": "Subagent cross-cutting architectural audit",
+            "audit_blast_radius": "Upstream impact analysis — who breaks if a symbol changes",
+            "audit_against_blueprint": "Deterministic architectural rule verification",
         }
 
         delegate_runs = set()

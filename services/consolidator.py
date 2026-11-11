@@ -429,7 +429,9 @@ class DocumentConsolidator:
                     rendered_code = slice_body
             elif total_lines <= SMALL_FILE_LINE_THRESHOLD or is_rich_doc:
                 # Small/medium file -> include 100% of numbered lines!
-                rendered_code = "\n".join(f"{ln_no}: {lines[:350]}" for ln_no in range(1, total_lines + 1))
+                rendered_code = "\n".join(
+                    f"{ln_no}: {lines[ln_no - 1][:350]}" for ln_no in range(1, total_lines + 1)
+                )
             else:
                 # Large file (>380 lines) requested without a selector -> provide full AST Blueprint + first 180 lines
                 mode_label = f"Large File Smart Blueprint ({total_lines} lines)"

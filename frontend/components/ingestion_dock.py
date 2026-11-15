@@ -4,8 +4,12 @@ Features:
 - Tabbed Workflow: ⚡ Quick Index (Full Repo) vs 🌲 Selective Browse vs 📁 Uploads
 - Full-width, un-squished buttons with real-time feedback
 - Communicates exclusively over HTTP with FastAPI via APIClient
+- Non-blocking ingestion polling with incremental UI updates
 """
 import os
+import time
+from typing import Any, Dict, Optional
+
 import streamlit as st
 from streamlit_tree_select import tree_select
 
@@ -38,6 +42,44 @@ def _apply_ingest_result(api_client, result: dict):
     st.session_state.god_nodes_count = result.get("god_nodes_count", 0)
     st.session_state.vector_chunks_count = result.get("vector_chunks_count", 0)
     st.session_state.graph_folded = False
+
+
+def _poll_ingestion(api_client, job_id: str, message: str = "Ingesting...") -> Optional[Dict[str, Any]]:
+    """Non-blocking ingestion poll with incremental UI updates via st.empty().
+
+    Returns the result dict (or an error dict) when the job reaches a
+    terminal state. Updates the UI every second so the user sees live
+    progress instead of a frozen spinner.
+    """
+    status_placeholder = st.empty()
+    deadline = time.time() + 600  # 10 min timeout
+
+    while time.time() < deadline:
+        res = api_client.check_job_status(job_id)
+        status = res.get("status")
+
+        if status == "completed":
+            status_placeholder.success("✅ Ingestion complete!")
+            return res.get("result") or {"status": "completed", "job_id": job_id}
+        if status == "failed":
+            status_placeholder.error(
+                f"❌ Ingestion failed: {res.get('detail', 'Unknown error')}"
+            )
+            return {
+                "status": "error",
+                "detail": res.get("error", "Ingestion failed"),
+                "job_id": job_id,
+            }
+        if status == "error":
+            status_placeholder.error(f"❌ {res.get('detail', 'Unknown error')}")
+            return res
+
+        # queued / running — show live progress
+        status_placeholder.info(f"⏳ {message} (backend status: {status})")
+        time.sleep(1.0)
+
+    status_placeholder.error("⏱️ Ingestion timed out after 10 minutes.")
+    return {"status": "error", "detail": "Ingestion timed out", "job_id": job_id}
 
 
 def render_ingestion_dock(api_client):
@@ -88,22 +130,29 @@ def render_ingestion_dock(api_client):
             if not github_url:
                 st.warning("Please enter a GitHub repository URL.")
             else:
-                with st.spinner("Streaming tarball & building Graphify AST + vectors..."):
-                    res = api_client.ingest_github_backend(
-                        repo_url=github_url,
-                        branch=branch,
-                        token=active_token,
-                        max_files=max_files,
+                # Submit job immediately (non-blocking), then poll with live UI updates
+                res = api_client.ingest_github_backend(
+                    repo_url=github_url,
+                    branch=branch,
+                    token=active_token,
+                    max_files=max_files,
+                )
+                if res and res.get("status") == "queued":
+                    job_id = res["job_id"]
+                    result = _poll_ingestion(
+                        api_client, job_id, "Streaming tarball & building Graphify AST + vectors"
                     )
-                    if res and res.get("status") == "success":
-                        _apply_ingest_result(api_client, res)
+                    if result and result.get("status") == "success":
+                        _apply_ingest_result(api_client, result)
                         st.toast(
-                            f"Indexed {res['file_count']} files ({res['ast_nodes_count']} AST nodes)!",
+                            f"Indexed {result['file_count']} files ({result['ast_nodes_count']} AST nodes)!",
                             icon="✅",
                         )
                         st.rerun()
                     else:
-                        st.error(res.get("detail", "GitHub ingestion failed. Is the FastAPI backend running?"))
+                        st.error(result.get("detail", "GitHub ingestion failed. Is the FastAPI backend running?"))
+                else:
+                    st.error(res.get("detail", "GitHub ingestion failed. Is the FastAPI backend running?"))
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 2: Selective Tree Ingestion (Inspect Structure -> Pick Subsets)
@@ -170,19 +219,25 @@ def render_ingestion_dock(api_client):
                 use_container_width=True,
                 key="sel_index_btn",
             ):
-                with st.spinner(f"Ingesting {len(checked_paths)} selected files..."):
-                    res = api_client.ingest_github_backend(
-                        repo_url=sel_url,
-                        branch=info["branch"],
-                        token=active_sel_token,
-                        selected_paths=checked_paths,
+                res = api_client.ingest_github_backend(
+                    repo_url=sel_url,
+                    branch=info["branch"],
+                    token=active_sel_token,
+                    selected_paths=checked_paths,
+                )
+                if res and res.get("status") == "queued":
+                    job_id = res["job_id"]
+                    result = _poll_ingestion(
+                        api_client, job_id, f"Ingesting {len(checked_paths)} selected files"
                     )
-                    if res and res.get("status") == "success":
-                        _apply_ingest_result(api_client, res)
-                        st.toast(f"Indexed {res['file_count']} selected files!", icon="✅")
+                    if result and result.get("status") == "success":
+                        _apply_ingest_result(api_client, result)
+                        st.toast(f"Indexed {result['file_count']} selected files!", icon="✅")
                         st.rerun()
                     else:
-                        st.error(res.get("detail", "Failed to index selected files."))
+                        st.error(result.get("detail", "Failed to index selected files."))
+                else:
+                    st.error(res.get("detail", "Failed to index selected files."))
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 3: Local File Upload Queue
@@ -221,11 +276,17 @@ def render_ingestion_dock(api_client):
             if not files:
                 st.warning("Upload files above first.")
             else:
-                with st.spinner("Converting documents & indexing AST..."):
-                    result = api_client.ingest_files_backend(files)
+                res = api_client.ingest_files_backend(files)
+                if res and res.get("status") == "queued":
+                    job_id = res["job_id"]
+                    result = _poll_ingestion(
+                        api_client, job_id, "Converting documents & indexing AST"
+                    )
                     if result and result.get("status") == "success":
                         _apply_ingest_result(api_client, result)
                         st.toast(f"Indexed {result['file_count']} files!", icon="✅")
                         st.rerun()
                     else:
-                        st.error("Local indexing failed.")
+                        st.error(result.get("detail", "Local indexing failed."))
+                else:
+                    st.error("Local indexing failed.")

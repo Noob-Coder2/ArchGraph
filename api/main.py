@@ -315,6 +315,10 @@ async def _ingest_github_logic(
     selected_paths: Optional[List[str]],
     max_files: int,
 ) -> IngestResponse:
+    t_start = time.perf_counter()
+    timings: Dict[str, float] = {}
+
+    t0 = time.perf_counter()
     extracted_files, skipped_count, err = await GitHubService.fetch_repo_archive(
         owner=owner,
         repo=repo,
@@ -323,10 +327,16 @@ async def _ingest_github_logic(
         selected_paths=selected_paths,
         max_files=max_files,
     )
+    t1 = time.perf_counter()
+    timings["fetch_repo_archive"] = t1 - t0
     if err or not extracted_files:
         raise RuntimeError(err or "No valid source files found to index.")
 
+    t2 = time.perf_counter()
     session = await create_fresh_session()
+    t3 = time.perf_counter()
+    timings["create_fresh_session"] = t3 - t2
+
     CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs"}
     TEXT_EXTS = {".md", ".txt", ".rst"}
 
@@ -343,9 +353,31 @@ async def _ingest_github_logic(
             session.graphify.add_file(fpath, content)
             session.vector_engine.add_file(fpath, content, file_type="code")
 
+    t4 = time.perf_counter()
+    timings["register_files"] = t4 - t3
+
     graph_result = await asyncio.to_thread(session.graphify.build_graphify_pipeline)
+    t5 = time.perf_counter()
+    timings["build_graphify_pipeline"] = t5 - t4
+
     await asyncio.to_thread(session.vector_engine.build_index)
+    t6 = time.perf_counter()
+    timings["build_vector_index"] = t6 - t5
+
     session.files_count = len(extracted_files)
+
+    t7 = time.perf_counter()
+    session.graphify.file_contents.spill_to_sqlite()
+    t8 = time.perf_counter()
+    timings["spill_to_sqlite"] = t8 - t7
+
+    total = t8 - t_start
+    logger.info(
+        "Ingestion timing for session %s: %s total=%.2fs",
+        session.session_id,
+        {k: f"{v:.2f}s" for k, v in timings.items()},
+        total,
+    )
 
     return IngestResponse(
         session_id=session.session_id,

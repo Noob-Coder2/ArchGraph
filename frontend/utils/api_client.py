@@ -45,6 +45,16 @@ class APIClient:
         except Exception as exc:
             return {"status": "error", "detail": str(exc)}
 
+    def check_job_status(self, job_id: str) -> Dict[str, Any]:
+        """Single non-blocking check of /api/ingest/jobs/{job_id}."""
+        try:
+            poll = requests.get(f"{self.base_url}/api/ingest/jobs/{job_id}", timeout=(10, 10))
+            if poll.status_code == 200:
+                return poll.json()
+        except Exception:
+            pass
+        return {"status": "error", "detail": "Could not reach backend", "job_id": job_id}
+
     def _poll_job(self, job_id: str, poll_interval: float = DEFAULT_POLL_INTERVAL, timeout: float = DEFAULT_POLL_TIMEOUT) -> Dict[str, Any]:
         """Poll /api/ingest/jobs/{job_id} until the job reaches a terminal state."""
         poll_url = f"{self.base_url}/api/ingest/jobs/{job_id}"
@@ -82,7 +92,8 @@ class APIClient:
         selected_paths: Optional[List[str]] = None,
         max_files: int = 1000,
     ) -> Dict[str, Any]:
-        """Triggers GitHub tarball ingestion and polls until the job completes."""
+        """Triggers GitHub tarball ingestion and returns job_id immediately (non-blocking).
+        Caller should poll check_job_status() until terminal state."""
         url = f"{self.base_url}/api/ingest/github"
         payload = {
             "repo_url": repo_url,
@@ -105,13 +116,14 @@ class APIClient:
                 return {"status": "error", "detail": "Backend did not return a job_id."}
         except Exception as exc:
             return {"status": "error", "detail": str(exc)}
-        return self._poll_job(job_id)
+        return {"status": "queued", "job_id": job_id}
 
     def ingest_files_backend(self, files: List[Any]) -> Optional[Dict[str, Any]]:
         """
         Sends uploaded files to FastAPI backend.
         Binary rich documents (.pdf, .docx, .pptx, .xlsx) are Base64-encoded so
         MarkItDown conversion happens strictly on the backend.
+        Returns immediately with job_id (non-blocking).
         """
         url = f"{self.base_url}/api/ingest/files"
         payload = {"files": []}
@@ -144,7 +156,7 @@ class APIClient:
                 return None
         except Exception:
             return None
-        return self._poll_job(job_id)
+        return {"status": "queued", "job_id": job_id}
 
     def get_graph_data_backend(self, session_id: str) -> Optional[Dict[str, Any]]:
         try:

@@ -263,7 +263,7 @@ class GraphifyEngine:
                     cohesion = score_all(undirected_g, self.communities)
                     self.god_nodes_list = god_nodes(undirected_g)
                     self.surprises_list = surprising_connections(undirected_g, self.communities)
-                    self.community_labels = {cid: f"Module {cid}" for cid in self.communities}
+                    self.community_labels = self._name_communities()
                     self.suggested_questions_list = suggest_questions(
                         undirected_g, self.communities, self.community_labels
                     )
@@ -538,6 +538,57 @@ class GraphifyEngine:
         """Returns the high-level executive report summary."""
         rep = self.report_markdown
         return rep if rep else self._build_concise_summary()
+
+    def _name_communities(self) -> Dict[int, str]:
+        """
+        Generate meaningful community names from node file paths and symbols.
+        Analyzes the most common directory prefix or symbol pattern in each
+        community to produce labels like 'auth', 'services', 'api', 'models'.
+        """
+        from collections import Counter
+
+        labels: Dict[int, str] = {}
+        for cid, members in self.communities.items():
+            path_counter: Counter[str] = Counter()
+            symbol_counter: Counter[str] = Counter()
+
+            for node in members:
+                data = self.graph.nodes[node] if node in self.graph else {}
+                fp = str(data.get("filepath") or data.get("source_file", ""))
+                label = str(data.get("label", node))
+
+                # Count top-level directory from file path
+                if fp and fp != "unknown":
+                    parts = fp.replace("\\", "/").split("/")
+                    if len(parts) > 1:
+                        path_counter[parts[0]] += 1
+                    else:
+                        path_counter["(root)"] += 1
+
+                # Count symbol name prefixes (e.g. "AuthService" from ".authenticate()")
+                clean = label.lstrip(".").rstrip("()")
+                if clean and clean != node:
+                    # Take first CamelCase word or snake_case prefix
+                    import re
+                    m = re.match(r"([A-Z][a-z]+|[a-z]+)", clean)
+                    if m:
+                        symbol_counter[m.group(1)] += 1
+
+            # Pick the best name: directory prefix first, then symbol prefix
+            if path_counter:
+                top_dir = path_counter.most_common(1)[0][0]
+                if top_dir != "(root)":
+                    labels[cid] = top_dir
+                elif symbol_counter:
+                    labels[cid] = symbol_counter.most_common(1)[0][0]
+                else:
+                    labels[cid] = f"Module {cid}"
+            elif symbol_counter:
+                labels[cid] = symbol_counter.most_common(1)[0][0]
+            else:
+                labels[cid] = f"Module {cid}"
+
+        return labels
 
     def get_symbol_context(self, symbol: str) -> str:
         """Alias for explain_symbol for backwards compatibility."""

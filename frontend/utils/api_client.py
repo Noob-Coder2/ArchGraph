@@ -184,3 +184,55 @@ class APIClient:
             return None
         except Exception:
             return None
+
+    def validate_model(
+        self,
+        provider: str,
+        model_name: str,
+        api_key: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        """
+        Implicitly verify that a model exists on the provider endpoint by
+        querying the provider's model listing API. Returns (ok, message).
+        No button required — call this whenever the model selection changes.
+        """
+        prov = provider.lower()
+        api_key = api_key or ""
+
+        # Provider model-listing endpoints
+        if "nvidia" in prov:
+            url = "https://integrate.api.nvidia.com/v1/models"
+        elif "groq" in prov:
+            url = "https://api.groq.com/openai/v1/models"
+        elif "openai" in prov:
+            url = "https://api.openai.com/v1/models"
+        elif "anthropic" in prov or "claude" in prov:
+            # Anthropic has no public model list API; fall back to backend health
+            try:
+                res = requests.get(f"{self.base_url}/health", timeout=(5, 10))
+                if res.status_code == 200:
+                    return True, f"Backend reachable. `{model_name}` will be used with Anthropic."
+                return False, "Backend not reachable."
+            except Exception:
+                return False, "Backend not reachable."
+        else:
+            return True, f"No model listing for provider `{provider}`. Assuming `{model_name}` is valid."
+
+        if not api_key:
+            return False, f"No API key configured for {provider}. Set it in Settings or .env."
+
+        try:
+            headers = {"Authorization": f"Bearer {api_key.strip()}"}
+            res = requests.get(url, headers=headers, timeout=(5, 15))
+            if res.status_code != 200:
+                return False, f"Provider API returned {res.status_code}. Check your API key."
+            models = res.json().get("data", [])
+            model_ids = [m.get("id", "") for m in models]
+            if model_name in model_ids:
+                return True, f"✅ `{model_name}` is available on {provider}."
+            # Fuzzy match: some providers return IDs with prefixes/suffixes
+            if any(model_name in mid or mid in model_name for mid in model_ids):
+                return True, f"✅ `{model_name}` is available on {provider}."
+            return False, f"❌ `{model_name}` not found on {provider}. Available: {', '.join(model_ids[:10])}..."
+        except requests.exceptions.RequestException as exc:
+            return False, f"Could not reach {provider} API: {str(exc)}"

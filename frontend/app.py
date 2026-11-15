@@ -145,40 +145,25 @@ def main():
                 st.session_state.llm_custom_model = ""
             st.session_state.llm_model = selected_model
 
-            # Model verification button
-            if selected_model:
-                col_verify, col_hint = st.columns([1, 3])
-                with col_verify:
-                    if st.button("🔍 Verify model", key="settings_verify_model", use_container_width=True):
-                        st.session_state["_verifying_model"] = selected_model
-                        st.session_state["_model_verify_result"] = None
-                with col_hint:
-                    st.caption("Checks backend health & model availability")
+            # Implicit model verification: runs whenever model or provider changes.
+            last_validated = st.session_state.get("_last_validated_model")
+            provider_key = f"{selected_provider}:{selected_model}"
+            if last_validated != provider_key and selected_model:
+                p_key = selected_provider.split()[0].lower()
+                api_key = st.session_state.get(f"custom_api_key_{p_key}", "").strip()
+                env_key = os.getenv(f"{p_key.upper()}_API_KEY", "").strip()
+                effective_key = api_key or env_key
+                ok, msg = api_client.validate_model(selected_provider, selected_model, effective_key)
+                st.session_state["_last_validated_model"] = provider_key
+                st.session_state["_model_verify_msg"] = msg
+                st.session_state["_model_verify_ok"] = ok
 
-            if st.session_state.get("_verifying_model") == selected_model:
-                result = st.session_state.get("_model_verify_result")
-                if result is None:
-                    import requests
-                    try:
-                        resp = requests.get(
-                            f"{api_client.base_url}/health", timeout=(5, 10)
-                        )
-                        backend_ok = resp.status_code == 200
-                    except Exception:
-                        backend_ok = False
-                    st.session_state["_model_verify_result"] = backend_ok
-                    result = backend_ok
-
-                if result:
-                    st.success(
-                        f"✅ Backend reachable. Model `{selected_model}` will be used "
-                        f"with `{selected_provider}`."
-                    )
+            msg = st.session_state.get("_model_verify_msg")
+            if msg:
+                if st.session_state.get("_model_verify_ok"):
+                    st.success(msg)
                 else:
-                    st.error(
-                        f"❌ Backend not reachable at {api_client.base_url}. "
-                        f"Start the FastAPI server first."
-                    )
+                    st.error(msg)
 
             p_key = selected_provider.split()[0].lower()
             env_key_set = bool(os.getenv(f"{p_key.upper()}_API_KEY", ""))

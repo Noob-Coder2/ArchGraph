@@ -22,6 +22,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 from langgraph.errors import GraphRecursionError
+from pydantic import SecretStr
 
 from core.tools import create_codebase_tools, build_repo_map, clip
 
@@ -81,43 +82,47 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
         return ChatNVIDIA(
             model=model_name,
-            api_key=api_key.strip(),
+            api_key=SecretStr(api_key.strip()),
             temperature=0.1,
             top_p=0.8,
             max_tokens=8192,
             timeout=120,
             max_retries=2,
+            streaming=True,
         )
     elif "groq" in prov:
         from langchain_groq import ChatGroq
         return ChatGroq(
-            model_name=model_name,
-            api_key=api_key.strip(),
+            model=model_name,
+            api_key=SecretStr(api_key.strip()),
             temperature=0.1,
-            top_p=0.8,
             max_tokens=8192,
             timeout=120,
             max_retries=2,
+            streaming=True,
         )
     elif "anthropic" in prov or "claude" in prov:
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
-            model=model_name,
-            api_key=api_key.strip(),
+            model_name=model_name,
+            api_key=SecretStr(api_key.strip()),
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens_to_sample=8192,
             timeout=120,
             max_retries=2,
+            streaming=True,
         )
     else:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model_name,
-            api_key=api_key.strip(),
+            api_key=SecretStr(api_key.strip()),
             temperature=0.1,
-            max_tokens=8192,
+            top_p=0.8,
+            max_completion_tokens=8192,
             timeout=120,
             max_retries=2,
+            streaming=True,
         )
 
 
@@ -355,6 +360,8 @@ class CodebaseAgent:
         recursion_hit = False
 
         try:
+            # type: ignore[call-overload] — CompiledStateGraph.astream_events overloads
+            # not resolvable by Pylance; runtime works fine.
             async for event in app_graph.astream_events(
                 {"messages": lc_messages},
                 config=config,

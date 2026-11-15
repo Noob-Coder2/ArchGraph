@@ -84,18 +84,20 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
             api_key=api_key.strip(),
             temperature=0.1,
             top_p=0.8,
-            max_completion_tokens=8192,
-            timeout=120
+            max_tokens=8192,
+            timeout=120,
+            max_retries=2,
         )
     elif "groq" in prov:
         from langchain_groq import ChatGroq
         return ChatGroq(
             model_name=model_name,
-            groq_api_key=api_key.strip(),
+            api_key=api_key.strip(),
             temperature=0.1,
             top_p=0.8,
             max_tokens=8192,
-            timeout=120
+            timeout=120,
+            max_retries=2,
         )
     elif "anthropic" in prov or "claude" in prov:
         from langchain_anthropic import ChatAnthropic
@@ -104,7 +106,8 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
             api_key=api_key.strip(),
             temperature=0.1,
             max_tokens=8192,
-            timeout=120
+            timeout=120,
+            max_retries=2,
         )
     else:
         from langchain_openai import ChatOpenAI
@@ -113,7 +116,8 @@ def get_chat_model(provider: str, model_name: str, api_key: str):
             api_key=api_key.strip(),
             temperature=0.1,
             max_tokens=8192,
-            timeout=120
+            timeout=120,
+            max_retries=2,
         )
 
 

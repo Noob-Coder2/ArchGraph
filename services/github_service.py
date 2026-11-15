@@ -297,3 +297,84 @@ class GitHubService:
             return res
 
         return [_convert(n) for n in tree_structure]
+
+    @classmethod
+    async def fetch_repo_files_parallel(
+        cls,
+        owner: str,
+        repo: str,
+        branch: str = "main",
+        token: Optional[str] = None,
+        selected_paths: Optional[List[str]] = None,
+        max_files: int = MAX_REPO_FILES_DEFAULT,
+        max_concurrent: int = 10,
+    ) -> Tuple[List[Dict[str, str]], int, Optional[str]]:
+        """
+        Fetches selected repository files in parallel via GitHub raw content API,
+        avoiding the full tarball download. Only fetches the files actually needed.
+        Much faster than fetch_repo_archive for selective ingestion.
+        """
+        if not selected_paths:
+            return [], 0, "No paths specified for parallel fetch"
+
+        selected_set = {p.replace("\\", "/").lstrip("/") for p in selected_paths}
+
+        # Filter to indexable paths first
+        indexable_paths = [p for p in selected_set if cls.is_indexable_path(p)]
+        skipped = len(selected_set) - len(indexable_paths)
+
+        if len(indexable_paths) > max_files:
+            indexable_paths = indexable_paths[:max_files]
+            skipped += len(selected_set) - max_files
+
+        if not indexable_paths:
+            return [], skipped, None
+
+        async def fetch_one(
+            client: httpx.AsyncClient, path: str
+        ) -> Optional[Dict[str, str]]:
+            url = f"{cls.RAW_CONTENT_URL}/{owner}/{repo}/{branch}/{path}"
+            try:
+                resp = await client.get(
+                    url, headers=cls.get_headers(token), timeout=30.0
+                )
+                if resp.status_code == 404:
+                    return None
+                if resp.status_code in (401, 403):
+                    return None
+                resp.raise_for_status()
+                content_bytes = resp.content
+                if b"\x00" in content_bytes[:2048]:
+                    return None
+                text_content = content_bytes.decode("utf-8", errors="replace")
+                return {"filepath": path, "content": text_content}
+            except Exception:
+                return None
+
+        extracted: List[Dict[str, str]] = []
+
+        try:
+            async with httpx.AsyncClient(
+                headers=cls.get_headers(token),
+                follow_redirects=True,
+                timeout=30.0,
+            ) as client:
+                semaphore = asyncio.Semaphore(max_concurrent)
+
+                async def fetch_with_sem(path: str) -> Optional[Dict[str, str]]:
+                    async with semaphore:
+                        return await fetch_one(client, path)
+
+                tasks = [fetch_with_sem(p) for p in indexable_paths]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for result in results:
+                    if isinstance(result, dict) and result is not None:
+                        extracted.append(result)
+                    elif isinstance(result, Exception):
+                        continue
+
+        except Exception as exc:
+            return extracted, skipped, f"Parallel fetch failed: {str(exc)}"
+
+        return extracted, skipped, None

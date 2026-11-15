@@ -126,8 +126,59 @@ def main():
                 ]
             }
             models = model_options_map.get(selected_provider, ["gpt-4o"])
-            selected_model = st.selectbox("Model", options=models, index=0, key="settings_model_select")
+            model_choice = st.selectbox(
+                "Model",
+                options=models + ["✏️ Custom model"],
+                index=0,
+                key="settings_model_select",
+            )
+            if model_choice == "✏️ Custom model":
+                selected_model = st.text_input(
+                    "Custom model name",
+                    value=st.session_state.get("llm_custom_model", ""),
+                    placeholder="e.g. meta/llama-3.1-405b-instruct",
+                    key="settings_custom_model_input",
+                )
+                st.session_state.llm_custom_model = selected_model
+            else:
+                selected_model = model_choice
+                st.session_state.llm_custom_model = ""
             st.session_state.llm_model = selected_model
+
+            # Model verification button
+            if selected_model:
+                col_verify, col_hint = st.columns([1, 3])
+                with col_verify:
+                    if st.button("🔍 Verify model", key="settings_verify_model", use_container_width=True):
+                        st.session_state["_verifying_model"] = selected_model
+                        st.session_state["_model_verify_result"] = None
+                with col_hint:
+                    st.caption("Checks backend health & model availability")
+
+            if st.session_state.get("_verifying_model") == selected_model:
+                result = st.session_state.get("_model_verify_result")
+                if result is None:
+                    import requests
+                    try:
+                        resp = requests.get(
+                            f"{api_client.base_url}/health", timeout=(5, 10)
+                        )
+                        backend_ok = resp.status_code == 200
+                    except Exception:
+                        backend_ok = False
+                    st.session_state["_model_verify_result"] = backend_ok
+                    result = backend_ok
+
+                if result:
+                    st.success(
+                        f"✅ Backend reachable. Model `{selected_model}` will be used "
+                        f"with `{selected_provider}`."
+                    )
+                else:
+                    st.error(
+                        f"❌ Backend not reachable at {api_client.base_url}. "
+                        f"Start the FastAPI server first."
+                    )
 
             p_key = selected_provider.split()[0].lower()
             env_key_set = bool(os.getenv(f"{p_key.upper()}_API_KEY", ""))

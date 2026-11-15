@@ -318,17 +318,32 @@ async def _ingest_github_logic(
     t_start = time.perf_counter()
     timings: Dict[str, float] = {}
 
-    t0 = time.perf_counter()
-    extracted_files, skipped_count, err = await GitHubService.fetch_repo_archive(
-        owner=owner,
-        repo=repo,
-        branch=branch,
-        token=token,
-        selected_paths=selected_paths,
-        max_files=max_files,
-    )
-    t1 = time.perf_counter()
-    timings["fetch_repo_archive"] = t1 - t0
+    # Use parallel raw-content fetch for selective ingestion (skips full tarball)
+    if selected_paths:
+        t0 = time.perf_counter()
+        extracted_files, skipped_count, err = await GitHubService.fetch_repo_files_parallel(
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            token=token,
+            selected_paths=selected_paths,
+            max_files=max_files,
+        )
+        t1 = time.perf_counter()
+        timings["fetch_repo_files_parallel"] = t1 - t0
+    else:
+        t0 = time.perf_counter()
+        extracted_files, skipped_count, err = await GitHubService.fetch_repo_archive(
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            token=token,
+            selected_paths=selected_paths,
+            max_files=max_files,
+        )
+        t1 = time.perf_counter()
+        timings["fetch_repo_archive"] = t1 - t0
+
     if err or not extracted_files:
         raise RuntimeError(err or "No valid source files found to index.")
 
@@ -339,19 +354,20 @@ async def _ingest_github_logic(
 
     CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs"}
     TEXT_EXTS = {".md", ".txt", ".rst"}
+    RICH_DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"}
 
+    # Separate code vs non-code pipelines:
+    # Code extensions -> Graphify AST + Vector
+    # Everything else -> Vector only (no Tree-Sitter extraction wasted on markdown/docs)
     for item in extracted_files:
         fpath, content = item["filepath"], item["content"]
         ext = Path(fpath).suffix.lower()
         if ext in CODE_EXTS:
             session.graphify.add_file(fpath, content)
             session.vector_engine.add_file(fpath, content, file_type="code")
-        elif ext in TEXT_EXTS:
-            session.graphify.add_file(fpath, content)
-            session.vector_engine.add_file(fpath, content, file_type="document")
         else:
-            session.graphify.add_file(fpath, content)
-            session.vector_engine.add_file(fpath, content, file_type="code")
+            # Text and rich documents go to vector only
+            session.vector_engine.add_file(fpath, content, file_type="document")
 
     t4 = time.perf_counter()
     timings["register_files"] = t4 - t3
@@ -417,15 +433,12 @@ async def _ingest_files_logic(files: List[IngestFilePayload]) -> IngestResponse:
             continue
 
         indexed_count += 1
-        if ext in RICH_DOC_EXTS or ext in TEXT_EXTS:
-            session.graphify.add_file(item.filename, content)
-            session.vector_engine.add_file(item.filename, content, file_type="document")
-        elif ext in CODE_EXTS:
+        if ext in CODE_EXTS:
             session.graphify.add_file(item.filename, content)
             session.vector_engine.add_file(item.filename, content, file_type="code")
         else:
-            session.graphify.add_file(item.filename, content)
-            session.vector_engine.add_file(item.filename, content, file_type="code")
+            # Text and rich documents go to vector only
+            session.vector_engine.add_file(item.filename, content, file_type="document")
 
     graph_result = await asyncio.to_thread(session.graphify.build_graphify_pipeline)
     await asyncio.to_thread(session.vector_engine.build_index)
@@ -539,3 +552,84 @@ async def chat_stream(req: ChatStreamRequest):
         ),
         media_type="text/event-stream",
     )
+
+
+def run_ingestion():
+    """
+    Console script entry point for parallel AST extraction.
+
+    Running via `archgraph-ingest` (installed from pyproject.toml [project.scripts])
+    makes `__main__` importable, which enables graphifyy's multiprocessing pool
+    to relaunch workers on Windows (Proactor event loop). When run via
+    `python -c` or stdin, `__main__` is not importable and graphifyy falls
+    back to sequential extraction.
+    """
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(description="ArchGraph ingestion pipeline")
+    parser.add_argument("repo_url", help="GitHub repository URL")
+    parser.add_argument("--branch", default="main", help="Target branch")
+    parser.add_argument("--token", default=None, help="GitHub PAT token")
+    parser.add_argument("--max-files", type=int, default=1000, help="Max files to index")
+    parser.add_argument(
+        "--session-id", default=None, help="Session ID (auto-generated if not provided)"
+    )
+    args = parser.parse_args()
+
+    import uuid
+    from core.graphify_engine import GraphifyEngine
+    from core.llamaindex_engine import LlamaIndexEngine
+    from services.storage import storage
+
+    session_id = args.session_id or str(uuid.uuid4())
+
+    async def _run():
+        parsed = GitHubService.parse_github_url(args.repo_url)
+        if not parsed:
+            print(f"Invalid GitHub URL: {args.repo_url}")
+            return 1
+
+        owner, repo = parsed["owner"], parsed["repo"]
+        branch = args.branch or parsed["branch"] or "main"
+
+        extracted_files, skipped_count, err = await GitHubService.fetch_repo_archive(
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            token=args.token,
+            selected_paths=None,
+            max_files=args.max_files,
+        )
+        if err or not extracted_files:
+            print(f"Fetch failed: {err or 'No files'}")
+            return 1
+
+        storage.create_or_update_session(session_id)
+        graph_engine = GraphifyEngine(session_id=session_id)
+        vector_engine = LlamaIndexEngine()
+
+        CODE_EXTS = {
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
+            ".java", ".c", ".cpp", ".h", ".hpp", ".cs",
+        }
+        for item in extracted_files:
+            fpath, content = item["filepath"], item["content"]
+            ext = Path(fpath).suffix.lower()
+            if ext in CODE_EXTS:
+                graph_engine.add_file(fpath, content)
+                vector_engine.add_file(fpath, content, file_type="code")
+            else:
+                vector_engine.add_file(fpath, content, file_type="document")
+
+        result = await asyncio.to_thread(graph_engine.build_graphify_pipeline)
+        await asyncio.to_thread(vector_engine.build_index)
+
+        print(
+            f"Ingestion complete: {len(extracted_files)} files, "
+            f"{result['nodes']} AST nodes, {result['edges']} edges, "
+            f"{vector_engine.chunks_count} vector chunks"
+        )
+        return 0
+
+    return asyncio.run(_run())
